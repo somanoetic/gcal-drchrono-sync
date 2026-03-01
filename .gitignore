@@ -1,0 +1,14 @@
+.env
+credentials.json
+token.json
+.drchrono_token.json
+sync_state.json
+buffer_state.json
+drchrono_gcal_state.json
+__pycache__/
+*.pyc
+.venv/
+venv/
+.claude/
+nul
+=5.0.0

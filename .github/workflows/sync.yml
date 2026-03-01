@@ -1,0 +1,64 @@
+name: Calendar Sync
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore cached state and tokens
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            token.json
+            .drchrono_token.json
+            sync_state.json
+            buffer_state.json
+            drchrono_gcal_state.json
+          key: sync-state-${{ github.run_id }}
+          restore-keys: sync-state-
+
+      - name: Write secrets to files
+        run: |
+          echo '${{ secrets.ENV_FILE }}' > .env
+          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+          # Only bootstrap tokens from secrets if cache miss
+          if [ ! -f token.json ]; then
+            echo '${{ secrets.GOOGLE_TOKEN }}' > token.json
+          fi
+          if [ ! -f .drchrono_token.json ]; then
+            echo '${{ secrets.DRCHRONO_TOKEN }}' > .drchrono_token.json
+          fi
+
+      - name: Run sync
+        run: python run_all.py
+
+      - name: Save state and tokens to cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            token.json
+            .drchrono_token.json
+            sync_state.json
+            buffer_state.json
+            drchrono_gcal_state.json
+          key: sync-state-${{ github.run_id }}
