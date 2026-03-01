@@ -240,11 +240,16 @@ def sync():
     print(f"Syncing {len(config.GOOGLE_CALENDAR_IDS)} calendar(s)...")
 
     for cal_id in config.GOOGLE_CALENDAR_IDS:
-        c, u, d, s = _sync_calendar(cal_id, state, force_full)
-        total_created += c
-        total_updated += u
-        total_deleted += d
-        total_skipped += s
+        try:
+            c, u, d, s = _sync_calendar(cal_id, state, force_full)
+            total_created += c
+            total_updated += u
+            total_deleted += d
+            total_skipped += s
+        except Exception as e:
+            print(f"    ERROR syncing calendar {cal_id}: {e}")
+            print("    Skipping this calendar and continuing...")
+            continue
 
     save_state(state)
 
