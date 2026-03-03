@@ -11,7 +11,10 @@ from googleapiclient.discovery import build
 
 import config
 
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/gmail.send",
+]
 
 
 def _get_credentials():

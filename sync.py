@@ -132,6 +132,7 @@ def _sync_calendar(calendar_id, state, force_full):
     updated = 0
     deleted = 0
     skipped = 0
+    conflicts = []
     seen_keys = set()
 
     for event in events:
@@ -185,6 +186,15 @@ def _sync_calendar(calendar_id, state, force_full):
                 print(f"    Created: {summary} ({scheduled_time}, {duration}m)")
             except Exception as e:
                 print(f"    WARNING: Failed to create block for '{summary}': {e}")
+                # Only report conflicts on incremental syncs — on full syncs,
+                # 409s are expected because blocks already exist in DrChrono
+                if "409" in str(e) and not is_full:
+                    conflicts.append({
+                        "summary": summary,
+                        "scheduled_time": scheduled_time,
+                        "duration": duration,
+                        "calendar_id": calendar_id,
+                    })
 
         # If an all-day event was shortened (fewer days), clean up extra day blocks
         old_day_keys = [k for k in event_map
@@ -216,7 +226,7 @@ def _sync_calendar(calendar_id, state, force_full):
                     print(f"    WARNING: Failed to clean up block {appt_id}: {e}")
 
     sync_tokens[calendar_id] = new_sync_token
-    return created, updated, deleted, skipped
+    return created, updated, deleted, skipped, conflicts
 
 
 def sync():
@@ -236,16 +246,18 @@ def sync():
     total_updated = 0
     total_deleted = 0
     total_skipped = 0
+    all_conflicts = []
 
     print(f"Syncing {len(config.GOOGLE_CALENDAR_IDS)} calendar(s)...")
 
     for cal_id in config.GOOGLE_CALENDAR_IDS:
         try:
-            c, u, d, s = _sync_calendar(cal_id, state, force_full)
+            c, u, d, s, conflicts = _sync_calendar(cal_id, state, force_full)
             total_created += c
             total_updated += u
             total_deleted += d
             total_skipped += s
+            all_conflicts.extend(conflicts)
         except Exception as e:
             print(f"    ERROR syncing calendar {cal_id}: {e}")
             print("    Skipping this calendar and continuing...")
@@ -255,6 +267,10 @@ def sync():
 
     print(f"\nDone. Created: {total_created}, Updated: {total_updated}, "
           f"Deleted: {total_deleted}, Skipped: {total_skipped}")
+    if all_conflicts:
+        print(f"  {len(all_conflicts)} block(s) failed due to conflicts.")
+
+    return all_conflicts
 
 
 if __name__ == "__main__":
