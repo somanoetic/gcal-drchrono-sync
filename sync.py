@@ -103,6 +103,44 @@ def _map_key(event_id, sub_key):
     return event_id
 
 
+def _retry_pending(state):
+    """Retry blocks that previously failed with 409. Mutates state in place.
+
+    Returns the number of retries that succeeded.
+    """
+    pending = state.get("pending_retries", [])
+    if not pending:
+        return 0
+
+    event_map = state.setdefault("event_map", {})
+    still_pending = []
+    resolved = 0
+
+    for entry in pending:
+        key = entry["key"]
+        # Already created by another path (e.g. full sync) — drop it
+        if key in event_map:
+            resolved += 1
+            continue
+        try:
+            reason = make_note(entry["summary"])
+            appt_ids = drchrono_client.create_break(
+                entry["scheduled_time"], entry["duration"], reason
+            )
+            event_map[key] = appt_ids
+            resolved += 1
+            print(f"    Retry succeeded: {entry['summary']} ({entry['scheduled_time']})")
+        except Exception as e:
+            if "409" in str(e):
+                still_pending.append(entry)
+                print(f"    Retry still blocked: {entry['summary']} ({entry['scheduled_time']})")
+            else:
+                print(f"    Retry failed: {entry['summary']}: {e}")
+
+    state["pending_retries"] = still_pending
+    return resolved
+
+
 def _sync_calendar(calendar_id, state, force_full):
     """Sync one Google Calendar into DrChrono. Mutates state in place."""
     sync_tokens = state.setdefault("sync_tokens", {})
@@ -186,15 +224,27 @@ def _sync_calendar(calendar_id, state, force_full):
                 print(f"    Created: {summary} ({scheduled_time}, {duration}m)")
             except Exception as e:
                 print(f"    WARNING: Failed to create block for '{summary}': {e}")
-                # Only report conflicts on incremental syncs — on full syncs,
-                # 409s are expected because blocks already exist in DrChrono
-                if "409" in str(e) and not is_full:
-                    conflicts.append({
-                        "summary": summary,
-                        "scheduled_time": scheduled_time,
-                        "duration": duration,
-                        "calendar_id": calendar_id,
-                    })
+                if "409" in str(e):
+                    # Queue for retry on next run
+                    pending = state.setdefault("pending_retries", [])
+                    # Avoid duplicate entries
+                    if not any(p["key"] == key for p in pending):
+                        pending.append({
+                            "key": key,
+                            "summary": summary,
+                            "scheduled_time": scheduled_time,
+                            "duration": duration,
+                            "calendar_id": calendar_id,
+                        })
+                    # Only notify on incremental syncs — on full syncs,
+                    # 409s are expected because blocks already exist
+                    if not is_full:
+                        conflicts.append({
+                            "summary": summary,
+                            "scheduled_time": scheduled_time,
+                            "duration": duration,
+                            "calendar_id": calendar_id,
+                        })
 
         # If an all-day event was shortened (fewer days), clean up extra day blocks
         old_day_keys = [k for k in event_map
@@ -247,6 +297,17 @@ def sync():
     total_deleted = 0
     total_skipped = 0
     all_conflicts = []
+
+    # Retry any blocks that previously failed with 409
+    pending_count = len(state.get("pending_retries", []))
+    if pending_count:
+        print(f"Retrying {pending_count} previously failed block(s)...")
+        resolved = _retry_pending(state)
+        if resolved:
+            print(f"  {resolved} block(s) resolved.")
+        remaining = len(state.get("pending_retries", []))
+        if remaining:
+            print(f"  {remaining} still blocked.")
 
     print(f"Syncing {len(config.GOOGLE_CALENDAR_IDS)} calendar(s)...")
 
