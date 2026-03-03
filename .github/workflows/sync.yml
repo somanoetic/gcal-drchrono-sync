@@ -40,10 +40,10 @@ jobs:
           echo '${{ secrets.ENV_FILE }}' > .env
           echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
 
-          # Only bootstrap tokens from secrets if cache miss
-          if [ ! -f token.json ]; then
-            echo '${{ secrets.GOOGLE_TOKEN }}' > token.json
-          fi
+          # Always write Google token from secret (scopes may have changed)
+          echo '${{ secrets.GOOGLE_TOKEN }}' > token.json
+
+          # DrChrono token: prefer cached (it rotates), fall back to secret
           if [ ! -f .drchrono_token.json ]; then
             echo '${{ secrets.DRCHRONO_TOKEN }}' > .drchrono_token.json
           fi
