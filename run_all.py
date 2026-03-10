@@ -23,13 +23,13 @@ def main():
 
     print()
     print("=" * 50)
-    print("Step 2: Google Calendar → DrChrono sync")
+    print("Step 2: Google Calendar -> DrChrono sync")
     print("=" * 50)
     conflicts = sync.sync()
 
     print()
     print("=" * 50)
-    print("Step 3: DrChrono → Google Calendar filtered sync")
+    print("Step 3: DrChrono -> Google Calendar filtered sync")
     print("=" * 50)
     drchrono_to_gcal.run()
 

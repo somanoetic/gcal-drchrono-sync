@@ -63,6 +63,12 @@ def _expand_allday(event):
     return blocks
 
 
+def _is_buffer_event(event):
+    """Return True if this event was created by the shift buffer script."""
+    props = event.get("extendedProperties", {}).get("private", {})
+    return props.get("createdBy") == config.BUFFER_EVENT_TAG
+
+
 def parse_event(event):
     """Parse a Google Calendar event into a list of blocks to sync.
 
@@ -212,9 +218,15 @@ def _sync_calendar(calendar_id, state, force_full):
                     drchrono_client.update_break(appt_ids, scheduled_time, duration, reason)
                     updated += 1
                     print(f"    Updated: {summary} ({scheduled_time}, {duration}m)")
+                    continue
+                except drchrono_client.NotFoundError:
+                    # Appointments were deleted from DrChrono — remove stale
+                    # mapping and fall through to recreate below
+                    print(f"    Stale mapping for {summary} — recreating...")
+                    del event_map[key]
                 except Exception as e:
                     print(f"    WARNING: Failed to update {appt_ids}: {e}")
-                continue
+                    continue
 
             # ── New → create ────────────────────────────────────────
             try:
@@ -258,25 +270,8 @@ def _sync_calendar(calendar_id, state, force_full):
             except Exception as e:
                 print(f"    WARNING: Failed to remove day block {block_ids}: {e}")
 
-    # ── On full sync, clean up stale mappings for this calendar ─────
-    if is_full:
-        current_event_ids = {e["id"] for e in events if e.get("status") != "cancelled"}
-        stale = [k for k in list(event_map.keys())
-                 if k not in seen_keys
-                 and k.split("__day__")[0] not in current_event_ids
-                 ]
-        if len(config.GOOGLE_CALENDAR_IDS) == 1 or force_full:
-            for key in stale:
-                block_ids = event_map.pop(key)
-                try:
-                    drchrono_client.delete_break(block_ids)
-                    deleted += 1
-                    print(f"    Cleaned up stale block: {key}")
-                except Exception as e:
-                    print(f"    WARNING: Failed to clean up block {appt_id}: {e}")
-
     sync_tokens[calendar_id] = new_sync_token
-    return created, updated, deleted, skipped, conflicts
+    return created, updated, deleted, skipped, conflicts, seen_keys, is_full
 
 
 def sync():
@@ -311,18 +306,40 @@ def sync():
 
     print(f"Syncing {len(config.GOOGLE_CALENDAR_IDS)} calendar(s)...")
 
+    all_seen_keys = set()
+    did_full_sync = False
+
     for cal_id in config.GOOGLE_CALENDAR_IDS:
         try:
-            c, u, d, s, conflicts = _sync_calendar(cal_id, state, force_full)
+            c, u, d, s, conflicts, seen_keys, is_full = _sync_calendar(cal_id, state, force_full)
             total_created += c
             total_updated += u
             total_deleted += d
             total_skipped += s
             all_conflicts.extend(conflicts)
+            all_seen_keys.update(seen_keys)
+            if is_full:
+                did_full_sync = True
         except Exception as e:
             print(f"    ERROR syncing calendar {cal_id}: {e}")
             print("    Skipping this calendar and continuing...")
             continue
+
+    # ── Stale cleanup after ALL calendars processed ───────────────
+    event_map = state.setdefault("event_map", {})
+    if did_full_sync and force_full:
+        stale = [k for k in list(event_map.keys()) if k not in all_seen_keys]
+        if stale:
+            print(f"\n  Cleaning up {len(stale)} stale mapping(s)...")
+        for key in stale:
+            block_ids = event_map[key]
+            try:
+                drchrono_client.delete_break(block_ids)
+                del event_map[key]
+                total_deleted += 1
+                print(f"    Cleaned up stale block: {key}")
+            except Exception as e:
+                print(f"    WARNING: Failed to clean up block {block_ids}: {e}")
 
     save_state(state)
 
