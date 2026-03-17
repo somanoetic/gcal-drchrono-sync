@@ -21,7 +21,11 @@ def main():
         print("DRY RUN -- pass --delete to actually remove appointments")
         print()
 
+    # Allow overriding patient ID via CLI: --patient=123456
     patient_id = config.DRCHRONO_BLOCK_PATIENT_ID
+    for arg in sys.argv[1:]:
+        if arg.startswith("--patient="):
+            patient_id = arg.split("=", 1)[1]
     if not patient_id:
         print("ERROR: DRCHRONO_BLOCK_PATIENT_ID not configured")
         return

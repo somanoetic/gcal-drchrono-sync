@@ -9,13 +9,39 @@ Usage:
 
 import sys
 
+import os
 import shift_buffers
 import sync
 import drchrono_to_gcal
 import notify
 
 
+def _run_one_time_cleanup():
+    """Run a one-time cleanup if the marker file exists, then remove it."""
+    marker = os.path.join(os.path.dirname(__file__), ".one_time_cleanup")
+    if not os.path.exists(marker):
+        return
+    with open(marker) as f:
+        args = f.read().strip().split()
+    os.remove(marker)
+    print("=" * 50)
+    print("One-time cleanup")
+    print("=" * 50)
+    import cleanup_orphaned_blocks
+    # Inject args for the cleanup script
+    import sys
+    old_argv = sys.argv
+    sys.argv = ["cleanup_orphaned_blocks.py", "--delete"] + args
+    try:
+        cleanup_orphaned_blocks.main()
+    finally:
+        sys.argv = old_argv
+    print()
+
+
 def main():
+    _run_one_time_cleanup()
+
     print("=" * 50)
     print("Step 1: Shift buffer sync")
     print("=" * 50)
