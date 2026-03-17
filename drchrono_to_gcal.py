@@ -80,11 +80,27 @@ def _target_calendar(summary, patient_cal_id, other_cal_id):
     return other_cal_id
 
 
+def _normalize_dt(dt_val):
+    """Normalize a datetime to a consistent UTC string for stable key generation.
+
+    This ensures the same moment in time always produces the same key,
+    regardless of whether the ICS feed uses UTC or local timezone.
+    """
+    if isinstance(dt_val, datetime.datetime):
+        if dt_val.tzinfo is not None:
+            utc_dt = dt_val.astimezone(datetime.timezone.utc)
+            return utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return dt_val.strftime("%Y-%m-%dT%H:%M:%S")
+    if isinstance(dt_val, datetime.date):
+        return dt_val.isoformat()
+    return str(dt_val)
+
+
 def _stable_key(summary, dtstart, dtend):
     """Build a stable key from event content since DrChrono ICS UIDs change each fetch."""
-    start_iso = _dt_to_iso(dtstart)
-    end_iso = _dt_to_iso(dtend)
-    return f"{summary}|{start_iso}|{end_iso}"
+    start_norm = _normalize_dt(dtstart)
+    end_norm = _normalize_dt(dtend)
+    return f"{summary}|{start_norm}|{end_norm}"
 
 
 def _dt_to_iso(dt_val):
@@ -110,12 +126,15 @@ def _clean_summary(summary, description=""):
     return summary
 
 
-def _build_gcal_body(summary, dtstart, dtend, description=""):
+def _build_gcal_body(summary, dtstart, dtend, description="", stable_key=""):
     """Build a Google Calendar event body from ICS data."""
     body = {
         "summary": _clean_summary(summary, description),
         "extendedProperties": {
-            "private": {"createdBy": config.DRCHRONO_SYNC_TAG}
+            "private": {
+                "createdBy": config.DRCHRONO_SYNC_TAG,
+                "stableKey": stable_key,
+            }
         },
     }
 
@@ -139,6 +158,105 @@ def _safe_delete(calendar_id, event_id):
         if e.resp.status in (404, 410):
             return False
         raise
+
+
+def _scan_existing_managed_events(patient_cal_id, other_cal_id):
+    """Scan GCal for events we previously created, indexed for dedup.
+
+    Returns two dicts:
+      by_stable_key: stableKey -> {gcal_event_id, calendar_id}
+      by_time: (calendar_id, start_iso, end_iso) -> [{gcal_event_id, ...}]
+    """
+    by_stable_key = {}
+    by_time = {}
+
+    for cal_id in [patient_cal_id, other_cal_id]:
+        if not cal_id:
+            continue
+        try:
+            events, _ = gcal_client.full_sync(cal_id)
+        except Exception as e:
+            print(f"  WARNING: Could not scan {cal_id}: {e}")
+            continue
+
+        for event in events:
+            props = event.get("extendedProperties", {}).get("private", {})
+            if props.get("createdBy") != config.DRCHRONO_SYNC_TAG:
+                continue
+
+            event_id = event["id"]
+            start = event.get("start", {})
+            end = event.get("end", {})
+            start_iso = start.get("dateTime") or start.get("date", "")
+            end_iso = end.get("dateTime") or end.get("date", "")
+
+            # Index by stable key (if present — new events will have this)
+            sk = props.get("stableKey", "")
+            if sk:
+                by_stable_key[sk] = {"gcal_event_id": event_id, "calendar_id": cal_id}
+
+            # Also index by time for fallback matching (older events without stableKey)
+            time_key = (cal_id, start_iso, end_iso)
+            by_time.setdefault(time_key, []).append(event_id)
+
+    return by_stable_key, by_time
+
+
+def _recover_event_map(ics_events, by_stable_key, by_time):
+    """Rebuild event_map from GCal when state is lost.
+
+    Matches ICS events to existing GCal events by stable key or time.
+    Returns the recovered event_map.
+    """
+    recovered = {}
+
+    for uid, evt in ics_events.items():
+        summary = evt["summary"]
+        dtstart = evt["dtstart"]
+        dtend = evt["dtend"]
+        target_cal = evt["calendar_id"]
+        start_iso = _dt_to_iso(dtstart)
+        end_iso = _dt_to_iso(dtend)
+
+        # Try stable key match first
+        if uid in by_stable_key:
+            info = by_stable_key[uid]
+            recovered[uid] = {
+                "gcal_event_id": info["gcal_event_id"],
+                "calendar_id": info["calendar_id"],
+                "summary": summary,
+                "dtstart": start_iso,
+                "dtend": end_iso,
+            }
+            continue
+
+        # Fall back to time-based match
+        time_key = (target_cal, start_iso, end_iso)
+        if time_key in by_time and by_time[time_key]:
+            gcal_event_id = by_time[time_key].pop(0)
+            recovered[uid] = {
+                "gcal_event_id": gcal_event_id,
+                "calendar_id": target_cal,
+                "summary": summary,
+                "dtstart": start_iso,
+                "dtend": end_iso,
+            }
+
+    return recovered
+
+
+def _cleanup_duplicates(by_time):
+    """Delete duplicate GCal events (multiple events at the same time slot).
+
+    After recovery, any remaining events in by_time with >0 entries are
+    duplicates that should be removed.
+    """
+    cleaned = 0
+    for (cal_id, _, _), event_ids in by_time.items():
+        for event_id in event_ids:
+            _safe_delete(cal_id, event_id)
+            cleaned += 1
+    return cleaned
 
 
 def _enrich_with_reasons(ics_events):
@@ -190,6 +308,35 @@ def _enrich_with_reasons(ics_events):
             matched += 1
 
     print(f"  Matched {matched} reason(s) from API for {len(non_patient)} non-patient event(s).")
+
+
+def _migrate_event_map_keys(event_map, ics_events):
+    """Migrate old-format event_map keys to new normalized format.
+
+    Old keys used _dt_to_iso (timezone-dependent), new keys use _normalize_dt (UTC).
+    If an old key matches a new key's content, rename it.
+    """
+    # Build reverse lookup: (summary, old_start, old_end) -> old_key
+    old_by_content = {}
+    for old_key, info in list(event_map.items()):
+        content_key = (info["summary"], info["dtstart"], info["dtend"])
+        old_by_content[content_key] = old_key
+
+    migrated = 0
+    for new_key, evt in ics_events.items():
+        if new_key in event_map:
+            continue  # already has new-format key
+        # Check if there's an old-format entry with matching content
+        start_iso = _dt_to_iso(evt["dtstart"])
+        end_iso = _dt_to_iso(evt["dtend"])
+        content_key = (evt["summary"], start_iso, end_iso)
+        old_key = old_by_content.get(content_key)
+        if old_key and old_key in event_map:
+            event_map[new_key] = event_map.pop(old_key)
+            migrated += 1
+
+    if migrated:
+        print(f"  Migrated {migrated} event map key(s) to new format.")
 
 
 def run():
@@ -260,6 +407,26 @@ def run():
 
     print(f"  Found {len(ics_events)} event(s) (after filtering block echoes).")
 
+    # Migrate old event_map keys to new normalized format
+    _migrate_event_map_keys(event_map, ics_events)
+
+    # Scan GCal for existing managed events to prevent duplicates on state loss
+    print("  Scanning GCal for existing managed events...")
+    by_stable_key, by_time = _scan_existing_managed_events(patient_cal_id, other_cal_id)
+    # Count unique event IDs (events appear in both by_stable_key and by_time)
+    all_managed_ids = {info["gcal_event_id"] for info in by_stable_key.values()}
+    for event_ids in by_time.values():
+        all_managed_ids.update(event_ids)
+    managed_count = len(all_managed_ids)
+    print(f"  Found {managed_count} existing managed event(s) in GCal.")
+
+    # If event_map is empty but GCal has our events, recover instead of re-creating
+    if not event_map and managed_count > 0:
+        print("  Event map empty — recovering from GCal to prevent duplicates...")
+        event_map = _recover_event_map(ics_events, by_stable_key, by_time)
+        print(f"  Recovered {len(event_map)} mapping(s).")
+        state["event_map"] = event_map
+
     # Fetch appointment reasons from the DrChrono API for non-patient events.
     # The ICS feed doesn't include the "Reason" field, so we look it up via API.
     _enrich_with_reasons(ics_events)
@@ -268,6 +435,14 @@ def run():
     updated = 0
     deleted = 0
 
+    # Build index of stale event_map entries (will be deleted) by summary
+    # so we can detect rescheduled appointments (same summary, different times)
+    stale_by_summary = {}
+    for map_uid in list(event_map):
+        if map_uid not in ics_events:
+            info = event_map[map_uid]
+            stale_by_summary.setdefault(info["summary"], []).append(map_uid)
+
     # Create or update events
     for uid, evt in ics_events.items():
         summary = evt["summary"]
@@ -275,7 +450,7 @@ def run():
         dtstart = evt["dtstart"]
         dtend = evt["dtend"]
         target_cal = evt["calendar_id"]
-        gcal_body = _build_gcal_body(summary, dtstart, dtend, description)
+        gcal_body = _build_gcal_body(summary, dtstart, dtend, description, stable_key=uid)
 
         start_iso = _dt_to_iso(dtstart)
         end_iso = _dt_to_iso(dtend)
@@ -338,7 +513,98 @@ def run():
                     print(f"  WARNING: Failed to update {summary}: {e}")
             continue
 
-        # New event -> create
+        # New event — but first check if a matching GCal event already exists
+        # (prevents duplicates when state is lost)
+        adopted = False
+        if uid in by_stable_key:
+            info = by_stable_key.pop(uid)
+            event_map[uid] = {
+                "gcal_event_id": info["gcal_event_id"],
+                "calendar_id": info["calendar_id"],
+                "summary": summary,
+                "dtstart": start_iso,
+                "dtend": end_iso,
+            }
+            # Update the event to ensure it has current data
+            try:
+                gcal_client.update_event(info["calendar_id"], info["gcal_event_id"], gcal_body)
+            except HttpError:
+                pass  # if update fails, at least we have the mapping
+            adopted = True
+            print(f"  Adopted (by key): {summary} ({start_iso})")
+        else:
+            # Fall back to time-based match
+            time_key = (target_cal, start_iso, end_iso)
+            if time_key in by_time and by_time[time_key]:
+                gcal_event_id = by_time[time_key].pop(0)
+                event_map[uid] = {
+                    "gcal_event_id": gcal_event_id,
+                    "calendar_id": target_cal,
+                    "summary": summary,
+                    "dtstart": start_iso,
+                    "dtend": end_iso,
+                }
+                try:
+                    gcal_client.update_event(target_cal, gcal_event_id, gcal_body)
+                except HttpError:
+                    pass
+                adopted = True
+                print(f"  Adopted (by time): {summary} ({start_iso})")
+
+        if adopted:
+            continue
+
+        # Check if this is a rescheduled appointment (same summary, different times)
+        # A stale entry with the same summary that's about to be deleted is likely
+        # the same appointment at its old time.
+        if not adopted and summary in stale_by_summary and stale_by_summary[summary]:
+            candidates = stale_by_summary[summary]
+            # Pick the best match — prefer same date, then closest time
+            best_uid = candidates[0]
+            if len(candidates) > 1:
+                for c_uid in candidates:
+                    c_info = event_map[c_uid]
+                    # Prefer a candidate on the same date
+                    if c_info["dtstart"][:10] == start_iso[:10]:
+                        best_uid = c_uid
+                        break
+
+            old_info = event_map.pop(best_uid)
+            candidates.remove(best_uid)
+
+            reschedule_handled = False
+            if old_info["calendar_id"] == target_cal:
+                # Same calendar — update in place
+                try:
+                    gcal_client.update_event(
+                        target_cal, old_info["gcal_event_id"], gcal_body
+                    )
+                    event_map[uid] = {
+                        "gcal_event_id": old_info["gcal_event_id"],
+                        "calendar_id": target_cal,
+                        "summary": summary,
+                        "dtstart": start_iso,
+                        "dtend": end_iso,
+                    }
+                    updated += 1
+                    print(
+                        f"  Rescheduled: {summary} "
+                        f"({old_info['dtstart']} -> {start_iso})"
+                    )
+                    reschedule_handled = True
+                except HttpError as e:
+                    if e.resp.status in (404, 410):
+                        pass  # GCal event gone — fall through to create
+                    else:
+                        print(f"  WARNING: Failed to update rescheduled {summary}: {e}")
+            else:
+                # Calendar changed — delete from old calendar, will create in new below
+                _safe_delete(old_info["calendar_id"], old_info["gcal_event_id"])
+
+            if reschedule_handled:
+                continue
+
+        # Truly new event -> create
         try:
             new_event = gcal_client.create_event(target_cal, gcal_body)
             event_map[uid] = {
@@ -360,6 +626,22 @@ def run():
         _safe_delete(info["calendar_id"], info["gcal_event_id"])
         deleted += 1
         print(f"  Deleted: {info['summary']}")
+
+    # Clean up any remaining duplicate managed events in GCal
+    # (events that exist in GCal with our tag but weren't matched to any ICS event)
+    # IMPORTANT: Exclude events that are tracked in event_map — by_time contains
+    # ALL managed events, not just orphans.
+    tracked_gcal_ids = {info["gcal_event_id"] for info in event_map.values()}
+    for time_key in by_time:
+        by_time[time_key] = [
+            eid for eid in by_time[time_key] if eid not in tracked_gcal_ids
+        ]
+    leftover = sum(len(v) for v in by_time.values())
+    if leftover > 0:
+        print(f"  Cleaning up {leftover} orphaned duplicate(s)...")
+        cleaned = _cleanup_duplicates(by_time)
+        if cleaned:
+            print(f"  Removed {cleaned} duplicate event(s).")
 
     state["event_map"] = event_map
     state["last_fetch"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
