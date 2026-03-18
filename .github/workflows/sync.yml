@@ -51,9 +51,9 @@ jobs:
             echo '${{ secrets.DRCHRONO_TOKEN }}' > .drchrono_token.json
           fi
 
-      # TODO: Remove after first successful run — deletes old patient-based blocks
-      - name: One-time cleanup of patient-based blocks
-        run: python cleanup_orphaned_blocks.py --delete --patient=132987328
+      # TODO: Remove after first successful run — deletes old Emma Heinrich blocks
+      - name: One-time cleanup of Emma Heinrich blocks
+        run: python cleanup_orphaned_blocks.py --delete --patient=132440724
 
       - name: Clear sync state for fresh block creation
         run: "python -c \"import json; s=json.load(open('sync_state.json')); s['event_map']={}; s['pending_retries']=[]; json.dump(s,open('sync_state.json','w'),indent=2); print('Cleared sync_state event_map')\""
