@@ -101,17 +101,38 @@ def _safe_delete(calendar_id, event_id):
         raise
 
 
-def _create_buffers(calendar_id, shift_start, shift_end):
-    """Create pre and post buffer events. Returns (pre_id, post_id)."""
+def _create_buffers(calendar_id, shift_start, shift_end, existing_buffers=None):
+    """Create pre and post buffer events. Returns (pre_id, post_id).
+
+    If existing_buffers is provided, adopt matching tagged events instead
+    of creating duplicates.
+    """
     pre_start, pre_end, post_start, post_end = _compute_buffer_times(shift_start, shift_end)
 
-    pre_body = _build_buffer_body(config.BUFFER_PRE_LABEL, pre_start, pre_end)
-    post_body = _build_buffer_body(config.BUFFER_POST_LABEL, post_start, post_end)
+    pre_id = None
+    post_id = None
 
-    pre_event = gcal_client.create_event(calendar_id, pre_body)
-    post_event = gcal_client.create_event(calendar_id, post_body)
+    # Try to adopt existing tagged buffer events at matching times
+    if existing_buffers:
+        pre_key = (pre_start, pre_end)
+        post_key = (post_start, post_end)
+        if pre_key in existing_buffers and existing_buffers[pre_key]:
+            pre_id = existing_buffers[pre_key].pop(0)
+        if post_key in existing_buffers and existing_buffers[post_key]:
+            post_id = existing_buffers[post_key].pop(0)
 
-    return pre_event["id"], post_event["id"]
+    # Create any buffers we couldn't adopt
+    if not pre_id:
+        pre_body = _build_buffer_body(config.BUFFER_PRE_LABEL, pre_start, pre_end)
+        pre_event = gcal_client.create_event(calendar_id, pre_body)
+        pre_id = pre_event["id"]
+
+    if not post_id:
+        post_body = _build_buffer_body(config.BUFFER_POST_LABEL, post_start, post_end)
+        post_event = gcal_client.create_event(calendar_id, post_body)
+        post_id = post_event["id"]
+
+    return pre_id, post_id
 
 
 def _update_buffers(calendar_id, mapping, shift_start, shift_end):
@@ -155,7 +176,29 @@ def _delete_buffers(calendar_id, mapping):
     _safe_delete(calendar_id, mapping["post_buffer_id"])
 
 
-def _cleanup_old_buffers(calendar_id, shift_map):
+def _scan_existing_buffers(calendar_id):
+    """Scan GCal for tagged buffer events, indexed by (start, end) for dedup.
+
+    Returns:
+      by_time: (start_iso, end_iso) -> [event_id, ...]
+      all_events: full event list (reused for old-buffer cleanup)
+    """
+    all_events, _ = gcal_client.full_sync(calendar_id)
+    by_time = {}
+
+    for event in all_events:
+        props = event.get("extendedProperties", {}).get("private", {})
+        if props.get("createdBy") != config.BUFFER_EVENT_TAG:
+            continue
+        start = event.get("start", {}).get("dateTime", "")
+        end = event.get("end", {}).get("dateTime", "")
+        if start and end:
+            by_time.setdefault((start, end), []).append(event["id"])
+
+    return by_time, all_events
+
+
+def _cleanup_old_buffers(calendar_id, shift_map, all_events):
     """Delete old buffer events (e.g. from Zapier) that lack our tag.
 
     Deletes:
@@ -169,9 +212,6 @@ def _cleanup_old_buffers(calendar_id, shift_map):
         our_buffer_ids.add(mapping["post_buffer_id"])
 
     cleaned = 0
-
-    # Scan all events once — we need the full list for both named and untitled cleanup
-    all_events, _ = gcal_client.full_sync(calendar_id)
 
     # Build shift boundary times from live SL events (not just state file)
     shift_boundaries = set()
@@ -221,6 +261,29 @@ def _cleanup_old_buffers(calendar_id, shift_map):
     return cleaned
 
 
+def _cleanup_orphaned_buffers(existing_buffers, shift_map, calendar_id):
+    """Delete tagged buffer events that are not tracked in shift_map.
+
+    Called after the main sync loop. existing_buffers entries that were
+    adopted have been popped; remaining entries are orphans.
+    """
+    # Collect all tracked buffer IDs
+    tracked_ids = set()
+    for mapping in shift_map.values():
+        tracked_ids.add(mapping["pre_buffer_id"])
+        tracked_ids.add(mapping["post_buffer_id"])
+
+    cleaned = 0
+    for (start, _), event_ids in existing_buffers.items():
+        for event_id in event_ids:
+            if event_id in tracked_ids:
+                continue
+            _safe_delete(calendar_id, event_id)
+            cleaned += 1
+
+    return cleaned
+
+
 def run():
     force_full = "--full" in sys.argv
     state = load_state()
@@ -230,9 +293,15 @@ def run():
 
     print(f"Shift buffer sync on calendar: {calendar_id}")
 
+    # Scan GCal for existing tagged buffer events (used for dedup + orphan cleanup)
+    existing_buffers, all_events = _scan_existing_buffers(calendar_id)
+    tagged_count = sum(len(v) for v in existing_buffers.values())
+    if tagged_count:
+        print(f"  Found {tagged_count} existing tagged buffer event(s) in GCal.")
+
     # Clean up old untagged buffer events (e.g. from Zapier)
     print("  Cleaning up old buffer events...")
-    cleaned = _cleanup_old_buffers(calendar_id, shift_map)
+    cleaned = _cleanup_old_buffers(calendar_id, shift_map, all_events)
     if cleaned:
         print(f"  Removed {cleaned} old buffer event(s).")
 
@@ -265,6 +334,7 @@ def run():
     updated = 0
     deleted = 0
     skipped = 0
+    adopted = 0
     seen_shift_ids = set()
 
     for event in events:
@@ -305,9 +375,12 @@ def run():
                 print(f"  WARNING: Failed to update buffers for {summary}: {e}")
             continue
 
-        # New shift → create buffers
+        # New shift → adopt existing tagged buffers or create new ones
         try:
-            pre_id, post_id = _create_buffers(calendar_id, shift_start, shift_end)
+            pre_id, post_id = _create_buffers(
+                calendar_id, shift_start, shift_end,
+                existing_buffers=existing_buffers,
+            )
             shift_map[event_id] = {
                 "pre_buffer_id": pre_id,
                 "post_buffer_id": post_id,
@@ -327,6 +400,11 @@ def run():
             _delete_buffers(calendar_id, mapping)
             deleted += 1
             print(f"  Cleaned up stale buffers: {sid}")
+
+    # Clean up orphaned tagged buffer events (exist in GCal but not tracked)
+    orphans = _cleanup_orphaned_buffers(existing_buffers, shift_map, calendar_id)
+    if orphans:
+        print(f"  Removed {orphans} orphaned duplicate buffer(s).")
 
     # Save state
     state["sync_token"] = new_sync_token
