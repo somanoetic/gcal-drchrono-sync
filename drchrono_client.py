@@ -142,8 +142,8 @@ def _request_with_retry(session, method, url, max_retries=5, **kwargs):
 def create_break(scheduled_time, duration_minutes, reason=""):
     """Create a break appointment in each configured office.
 
-    Sets patient=null so DrChrono treats it as a break (appt_is_break=true),
-    not a regular appointment.
+    Uses the configured block patient + profile. DrChrono API requires a
+    patient (patient=null returns 400), so we use a dummy patient.
     Returns a list of created appointment IDs (one per office).
     Skips offices where the time slot conflicts (409).
     """
@@ -158,7 +158,8 @@ def create_break(scheduled_time, duration_minutes, reason=""):
             "exam_room": exam_room,
             "scheduled_time": scheduled_time,
             "duration": duration_minutes,
-            "patient": "",
+            "patient": int(config.DRCHRONO_BLOCK_PATIENT_ID),
+            "profile": int(config.DRCHRONO_BLOCK_PROFILE_ID),
             "reason": reason,
         }
         resp = _request_with_retry(session, "post",
@@ -167,9 +168,6 @@ def create_break(scheduled_time, duration_minutes, reason=""):
         if resp.status_code == 409:
             # Overlap with existing appointment -- skip this office
             continue
-        if resp.status_code == 400:
-            # Log the response body for debugging
-            print(f"    DEBUG 400 response: {resp.text[:300]}")
         resp.raise_for_status()
         appt_ids.append(resp.json()["id"])
 
