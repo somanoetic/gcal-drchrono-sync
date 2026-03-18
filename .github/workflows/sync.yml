@@ -2,7 +2,7 @@ name: Calendar Sync
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # safety-net polling (event-triggered is primary)
+    - cron: "*/10 * * * *"   # polls for DrChrono changes (event-triggered handles GCal)
   workflow_dispatch:
   repository_dispatch:
     types: [calendar-changed]
