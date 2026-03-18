@@ -63,17 +63,20 @@ def _resolve_calendar_ids():
     return patient_cal, other_cal
 
 
-def _is_block_echo(summary):
+def _is_block_echo(summary, description=""):
     """Return True if this event is an echo of a block we created.
 
-    Matches either:
-    - The configured patient name (legacy: dummy patient approach)
-    - The [GCal Sync] tag in the summary (break with patient=null)
+    Checks both summary and description for:
+    - The configured patient name(s) (comma-separated for multiple)
+    - The [GCal Sync] tag (set in the reason field, appears in description)
     """
-    s = summary or ""
-    if config.DRCHRONO_BLOCK_PATIENT_NAME and config.DRCHRONO_BLOCK_PATIENT_NAME in s:
-        return True
-    if config.BLOCK_NOTE_PREFIX in s:
+    text = f"{summary or ''} {description or ''}"
+    # Check patient name(s) — supports comma-separated list
+    for name in (config.DRCHRONO_BLOCK_PATIENT_NAME or "").split(","):
+        name = name.strip()
+        if name and name in text:
+            return True
+    if config.BLOCK_NOTE_PREFIX in text:
         return True
     return False
 
@@ -399,7 +402,7 @@ def run():
         dtend = dtend.dt
 
         # Skip block echoes
-        if _is_block_echo(summary):
+        if _is_block_echo(summary, description):
             continue
 
         target_cal = _target_calendar(summary, patient_cal_id, other_cal_id)
