@@ -49,10 +49,6 @@ jobs:
             echo '${{ secrets.DRCHRONO_TOKEN }}' > .drchrono_token.json
           fi
 
-      # TODO: Remove this step after first successful run
-      - name: One-time cleanup of old block patient
-        run: python cleanup_orphaned_blocks.py --delete --patient=132440724
-
       - name: Run sync
         run: python run_all.py
 
