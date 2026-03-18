@@ -91,14 +91,24 @@ def _compute_buffer_times(shift_start_iso, shift_end_iso):
 
 
 def _safe_delete(calendar_id, event_id):
-    """Delete a buffer event, returning True on success. Swallows 404/410."""
-    try:
-        gcal_client.delete_event(calendar_id, event_id)
-        return True
-    except HttpError as e:
-        if e.resp.status in (404, 410):
-            return False
-        raise
+    """Delete a buffer event, returning True on success. Swallows 404/410.
+
+    Retries on 403 rate limit with exponential backoff.
+    """
+    import time
+    for attempt in range(4):
+        try:
+            gcal_client.delete_event(calendar_id, event_id)
+            return True
+        except HttpError as e:
+            if e.resp.status in (404, 410):
+                return False
+            if e.resp.status == 403 and "rateLimitExceeded" in str(e):
+                wait = 2 ** (attempt + 1)
+                time.sleep(wait)
+                continue
+            raise
+    return False
 
 
 def _create_buffers(calendar_id, shift_start, shift_end, existing_buffers=None):
@@ -267,6 +277,8 @@ def _cleanup_orphaned_buffers(existing_buffers, shift_map, calendar_id):
     Called after the main sync loop. existing_buffers entries that were
     adopted have been popped; remaining entries are orphans.
     """
+    import time
+
     # Collect all tracked buffer IDs
     tracked_ids = set()
     for mapping in shift_map.values():
@@ -278,8 +290,11 @@ def _cleanup_orphaned_buffers(existing_buffers, shift_map, calendar_id):
         for event_id in event_ids:
             if event_id in tracked_ids:
                 continue
-            _safe_delete(calendar_id, event_id)
-            cleaned += 1
+            if _safe_delete(calendar_id, event_id):
+                cleaned += 1
+            # Throttle to avoid GCal rate limits
+            if cleaned % 10 == 0:
+                time.sleep(1)
 
     return cleaned
 
