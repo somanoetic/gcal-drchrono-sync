@@ -158,7 +158,7 @@ def create_break(scheduled_time, duration_minutes, reason=""):
             "exam_room": exam_room,
             "scheduled_time": scheduled_time,
             "duration": duration_minutes,
-            "patient": None,
+            "patient": "",
             "reason": reason,
         }
         resp = _request_with_retry(session, "post",
@@ -167,6 +167,9 @@ def create_break(scheduled_time, duration_minutes, reason=""):
         if resp.status_code == 409:
             # Overlap with existing appointment -- skip this office
             continue
+        if resp.status_code == 400:
+            # Log the response body for debugging
+            print(f"    DEBUG 400 response: {resp.text[:300]}")
         resp.raise_for_status()
         appt_ids.append(resp.json()["id"])
 
