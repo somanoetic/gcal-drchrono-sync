@@ -64,8 +64,18 @@ def _resolve_calendar_ids():
 
 
 def _is_block_echo(summary):
-    """Return True if this event is an echo of a block we created."""
-    return config.DRCHRONO_BLOCK_PATIENT_NAME in (summary or "")
+    """Return True if this event is an echo of a block we created.
+
+    Matches either:
+    - The configured patient name (legacy: dummy patient approach)
+    - The [GCal Sync] tag in the summary (break with patient=null)
+    """
+    s = summary or ""
+    if config.DRCHRONO_BLOCK_PATIENT_NAME and config.DRCHRONO_BLOCK_PATIENT_NAME in s:
+        return True
+    if config.BLOCK_NOTE_PREFIX in s:
+        return True
+    return False
 
 
 def _is_patient_appointment(summary):

@@ -142,7 +142,8 @@ def _request_with_retry(session, method, url, max_retries=5, **kwargs):
 def create_break(scheduled_time, duration_minutes, reason=""):
     """Create a break appointment in each configured office.
 
-    Uses the placeholder patient + "Dr Hadfield Unavailable" profile.
+    Sets patient=null so DrChrono treats it as a break (appt_is_break=true),
+    not a regular appointment.
     Returns a list of created appointment IDs (one per office).
     Skips offices where the time slot conflicts (409).
     """
@@ -157,8 +158,7 @@ def create_break(scheduled_time, duration_minutes, reason=""):
             "exam_room": exam_room,
             "scheduled_time": scheduled_time,
             "duration": duration_minutes,
-            "patient": int(config.DRCHRONO_BLOCK_PATIENT_ID),
-            "profile": int(config.DRCHRONO_BLOCK_PROFILE_ID),
+            "patient": None,
             "reason": reason,
         }
         resp = _request_with_retry(session, "post",
