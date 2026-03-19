@@ -34,7 +34,6 @@ jobs:
             sync_state.json
             buffer_state.json
             drchrono_gcal_state.json
-            .one_time_cleanup
           key: sync-state-${{ github.run_id }}
           restore-keys: sync-state-
 
