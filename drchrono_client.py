@@ -235,6 +235,23 @@ def fetch_appointments(date_start, date_end, doctor_id=None):
     return results
 
 
+# -- Appointment profiles ----------------------------------------------
+
+
+def fetch_appointment_profiles():
+    """Fetch all appointment profiles and return a dict of id -> name."""
+    session = _get_session()
+    results = []
+    url = f"{config.DRCHRONO_API_BASE}/appointment_profiles"
+    while url:
+        resp = _request_with_retry(session, "get", url)
+        resp.raise_for_status()
+        data = resp.json()
+        results.extend(data.get("results", []))
+        url = data.get("next")
+    return {p["id"]: p["name"] for p in results}
+
+
 # -- Discovery helpers -------------------------------------------------
 
 

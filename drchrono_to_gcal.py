@@ -125,13 +125,22 @@ def _dt_to_iso(dt_val):
     return str(dt_val)
 
 
-def _clean_summary(summary, description=""):
+def _clean_summary(summary, description="", profile_name=""):
     """Clean up event title for Google Calendar display.
 
-    For non-patient events, use the description (DrChrono "Reason" field)
-    as the title if available.
+    For patient appointments: "{Profile Name} - {initials}" e.g. "Infusion - SECH"
+    For non-patient events: use the description (DrChrono "Reason" field) if available.
     """
-    if not _is_patient_appointment(summary) and description.strip():
+    if _is_patient_appointment(summary):
+        initials = _extract_patient_initials(summary)
+        if profile_name and initials:
+            return f"{profile_name} - {initials}"
+        if profile_name:
+            return profile_name
+        if initials:
+            return f"Appointment - {initials}"
+        return summary
+    if description.strip():
         return description.strip()
     # DrChrono prefixes non-patient events with "Break " — strip it
     if summary.startswith("Break "):
@@ -139,10 +148,10 @@ def _clean_summary(summary, description=""):
     return summary
 
 
-def _build_gcal_body(summary, dtstart, dtend, description="", stable_key=""):
+def _build_gcal_body(summary, dtstart, dtend, description="", stable_key="", profile_name=""):
     """Build a Google Calendar event body from ICS data."""
     body = {
-        "summary": _clean_summary(summary, description),
+        "summary": _clean_summary(summary, description, profile_name),
         "extendedProperties": {
             "private": {
                 "createdBy": config.DRCHRONO_SYNC_TAG,
@@ -272,55 +281,93 @@ def _cleanup_duplicates(by_time):
     return cleaned
 
 
-def _enrich_with_reasons(ics_events):
-    """Look up the DrChrono 'reason' field via the API for non-patient events.
+def _extract_patient_initials(summary):
+    """Extract the 4-letter patient abbreviation from an ICS summary.
 
-    Mutates ics_events in-place, setting evt["description"] to the reason
-    when one is found.
+    Format: "Appointment with SECH07DE5E80" -> "SECH"
+    Takes the leading alpha characters (up to 4) from the patient code.
     """
-    # Collect the date range we need to query
-    non_patient = {uid: evt for uid, evt in ics_events.items()
-                   if not _is_patient_appointment(evt["summary"])}
-    if not non_patient:
-        return
+    prefix = "Appointment with "
+    if not summary.startswith(prefix):
+        return ""
+    code = summary[len(prefix):].strip()
+    # Extract leading alpha characters
+    initials = ""
+    for ch in code:
+        if ch.isalpha():
+            initials += ch
+        else:
+            break
+    return initials[:4]
 
+
+def _enrich_from_api(ics_events):
+    """Look up appointment details via the DrChrono API.
+
+    Mutates ics_events in-place:
+    - Non-patient events: sets evt["description"] to the reason field
+    - Patient appointments: sets evt["profile_name"] from the appointment profile
+    """
+    # Collect the full date range across all events
     dates = []
-    for evt in non_patient.values():
+    for evt in ics_events.values():
         dt = evt["dtstart"]
         dates.append(dt.date() if isinstance(dt, datetime.datetime) else dt)
+    if not dates:
+        return
     date_start = min(dates).isoformat()
     date_end = max(dates).isoformat()
 
-    print(f"  Fetching appointment reasons from API ({date_start} to {date_end})...")
+    print(f"  Fetching appointment details from API ({date_start} to {date_end})...")
     try:
         api_appts = drchrono_client.fetch_appointments(date_start, date_end)
     except Exception as e:
-        print(f"  WARNING: Could not fetch reasons from API: {e}")
+        print(f"  WARNING: Could not fetch from API: {e}")
         return
 
-    # Build lookup: scheduled_time -> reason (for non-patient / break appointments)
-    reason_lookup = {}
+    # Fetch profile ID -> name mapping
+    try:
+        profile_map = drchrono_client.fetch_appointment_profiles()
+    except Exception as e:
+        print(f"  WARNING: Could not fetch appointment profiles: {e}")
+        profile_map = {}
+
+    # Build lookup: scheduled_time -> {reason, profile_name}
+    appt_lookup = {}
     for appt in api_appts:
         sched = appt.get("scheduled_time", "")
+        if not sched:
+            continue
         reason = (appt.get("reason") or "").strip()
-        if reason and sched:
-            reason_lookup[sched] = reason
+        profile_id = appt.get("profile")
+        profile_name = profile_map.get(profile_id, "") if profile_id else ""
+        appt_lookup[sched] = {"reason": reason, "profile_name": profile_name}
 
     # Match ICS events to API appointments by start time
-    matched = 0
-    for uid, evt in non_patient.items():
+    reasons_matched = 0
+    profiles_matched = 0
+    for uid, evt in ics_events.items():
         dt = evt["dtstart"]
         if not isinstance(dt, datetime.datetime):
             continue
         # Strip timezone for matching — DrChrono API returns naive local times
         naive = dt.replace(tzinfo=None)
         api_time = naive.strftime("%Y-%m-%dT%H:%M:%S")
-        reason = reason_lookup.get(api_time, "")
-        if reason:
-            evt["description"] = reason
-            matched += 1
+        info = appt_lookup.get(api_time)
+        if not info:
+            continue
+        if not _is_patient_appointment(evt["summary"]) and info["reason"]:
+            evt["description"] = info["reason"]
+            reasons_matched += 1
+        if info["profile_name"]:
+            evt["profile_name"] = info["profile_name"]
+            profiles_matched += 1
 
-    print(f"  Matched {matched} reason(s) from API for {len(non_patient)} non-patient event(s).")
+    non_patient_count = sum(1 for e in ics_events.values()
+                           if not _is_patient_appointment(e["summary"]))
+    patient_count = len(ics_events) - non_patient_count
+    print(f"  Matched {reasons_matched} reason(s) for {non_patient_count} non-patient event(s).")
+    print(f"  Matched {profiles_matched} profile(s) for {patient_count} patient appointment(s).")
 
 
 def _migrate_event_map_keys(event_map, ics_events):
@@ -440,9 +487,9 @@ def run():
         print(f"  Recovered {len(event_map)} mapping(s).")
         state["event_map"] = event_map
 
-    # Fetch appointment reasons from the DrChrono API for non-patient events.
-    # The ICS feed doesn't include the "Reason" field, so we look it up via API.
-    _enrich_with_reasons(ics_events)
+    # Fetch appointment details from the DrChrono API.
+    # The ICS feed doesn't include the "Reason" or profile fields.
+    _enrich_from_api(ics_events)
 
     created = 0
     updated = 0
@@ -460,10 +507,12 @@ def run():
     for uid, evt in ics_events.items():
         summary = evt["summary"]
         description = evt.get("description", "")
+        profile_name = evt.get("profile_name", "")
         dtstart = evt["dtstart"]
         dtend = evt["dtend"]
         target_cal = evt["calendar_id"]
-        gcal_body = _build_gcal_body(summary, dtstart, dtend, description, stable_key=uid)
+        gcal_body = _build_gcal_body(summary, dtstart, dtend, description,
+                                     stable_key=uid, profile_name=profile_name)
 
         start_iso = _dt_to_iso(dtstart)
         end_iso = _dt_to_iso(dtend)
