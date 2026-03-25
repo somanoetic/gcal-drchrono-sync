@@ -125,21 +125,19 @@ def _dt_to_iso(dt_val):
     return str(dt_val)
 
 
-def _clean_summary(summary, description="", profile_name=""):
+def _clean_summary(summary, description="", profile_name="", is_telehealth=False):
     """Clean up event title for Google Calendar display.
 
-    For patient appointments: "{Profile Name} - {initials}" e.g. "Infusion - SECH"
+    For patient appointments: "{Profile Name} (Video/In-Person) - {initials}"
     For non-patient events: use the description (DrChrono "Reason" field) if available.
     """
     if _is_patient_appointment(summary):
         initials = _extract_patient_initials(summary)
-        if profile_name and initials:
-            return f"{profile_name} - {initials}"
-        if profile_name:
-            return profile_name
+        visit_type = "Video" if is_telehealth else "In-Person"
+        label = profile_name or "Appointment"
         if initials:
-            return f"Appointment - {initials}"
-        return summary
+            return f"{label} ({visit_type}) - {initials}"
+        return f"{label} ({visit_type})"
     if description.strip():
         return description.strip()
     # DrChrono prefixes non-patient events with "Break " — strip it
@@ -148,10 +146,11 @@ def _clean_summary(summary, description="", profile_name=""):
     return summary
 
 
-def _build_gcal_body(summary, dtstart, dtend, description="", stable_key="", profile_name=""):
+def _build_gcal_body(summary, dtstart, dtend, description="", stable_key="",
+                     profile_name="", is_telehealth=False):
     """Build a Google Calendar event body from ICS data."""
     body = {
-        "summary": _clean_summary(summary, description, profile_name),
+        "summary": _clean_summary(summary, description, profile_name, is_telehealth),
         "extendedProperties": {
             "private": {
                 "createdBy": config.DRCHRONO_SYNC_TAG,
@@ -332,7 +331,7 @@ def _enrich_from_api(ics_events):
         print(f"  WARNING: Could not fetch appointment profiles: {e}")
         profile_map = {}
 
-    # Build lookup: scheduled_time -> {reason, profile_name}
+    # Build lookup: scheduled_time -> {reason, profile_name, is_telehealth}
     appt_lookup = {}
     for appt in api_appts:
         sched = appt.get("scheduled_time", "")
@@ -341,7 +340,13 @@ def _enrich_from_api(ics_events):
         reason = (appt.get("reason") or "").strip()
         profile_id = appt.get("profile")
         profile_name = profile_map.get(profile_id, "") if profile_id else ""
-        appt_lookup[sched] = {"reason": reason, "profile_name": profile_name}
+        # DrChrono uses "telehealth" boolean on appointments
+        is_telehealth = bool(appt.get("telehealth"))
+        appt_lookup[sched] = {
+            "reason": reason,
+            "profile_name": profile_name,
+            "is_telehealth": is_telehealth,
+        }
 
     # Match ICS events to API appointments by start time
     reasons_matched = 0
@@ -362,6 +367,7 @@ def _enrich_from_api(ics_events):
         if info["profile_name"]:
             evt["profile_name"] = info["profile_name"]
             profiles_matched += 1
+        evt["is_telehealth"] = info["is_telehealth"]
 
     non_patient_count = sum(1 for e in ics_events.values()
                            if not _is_patient_appointment(e["summary"]))
@@ -508,11 +514,13 @@ def run():
         summary = evt["summary"]
         description = evt.get("description", "")
         profile_name = evt.get("profile_name", "")
+        is_telehealth = evt.get("is_telehealth", False)
         dtstart = evt["dtstart"]
         dtend = evt["dtend"]
         target_cal = evt["calendar_id"]
         gcal_body = _build_gcal_body(summary, dtstart, dtend, description,
-                                     stable_key=uid, profile_name=profile_name)
+                                     stable_key=uid, profile_name=profile_name,
+                                     is_telehealth=is_telehealth)
 
         start_iso = _dt_to_iso(dtstart)
         end_iso = _dt_to_iso(dtend)

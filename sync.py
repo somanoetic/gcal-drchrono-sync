@@ -109,8 +109,16 @@ def _map_key(event_id, sub_key):
     return event_id
 
 
+MAX_RETRY_ATTEMPTS = 3
+
+
 def _retry_pending(state):
     """Retry blocks that previously failed with 409. Mutates state in place.
+
+    Drops retries that:
+    - Have already been resolved by another path
+    - Are in the past (event time has passed)
+    - Have exceeded MAX_RETRY_ATTEMPTS
 
     Returns the number of retries that succeeded.
     """
@@ -118,9 +126,11 @@ def _retry_pending(state):
     if not pending:
         return 0
 
+    now = datetime.datetime.now()
     event_map = state.setdefault("event_map", {})
     still_pending = []
     resolved = 0
+    dropped = 0
 
     for entry in pending:
         key = entry["key"]
@@ -128,6 +138,23 @@ def _retry_pending(state):
         if key in event_map:
             resolved += 1
             continue
+
+        # Drop retries for events in the past
+        try:
+            event_time = datetime.datetime.fromisoformat(entry["scheduled_time"])
+            if event_time < now:
+                dropped += 1
+                continue
+        except (ValueError, KeyError):
+            pass
+
+        # Drop retries that have exceeded max attempts
+        attempts = entry.get("attempts", 1)
+        if attempts >= MAX_RETRY_ATTEMPTS:
+            dropped += 1
+            print(f"    Giving up after {attempts} attempts: {entry['summary']} ({entry['scheduled_time']})")
+            continue
+
         try:
             reason = make_note(entry["summary"])
             appt_ids = drchrono_client.create_break(
@@ -138,11 +165,14 @@ def _retry_pending(state):
             print(f"    Retry succeeded: {entry['summary']} ({entry['scheduled_time']})")
         except Exception as e:
             if "409" in str(e):
+                entry["attempts"] = attempts + 1
                 still_pending.append(entry)
                 print(f"    Retry still blocked: {entry['summary']} ({entry['scheduled_time']})")
             else:
                 print(f"    Retry failed: {entry['summary']}: {e}")
 
+    if dropped:
+        print(f"  Dropped {dropped} expired/exhausted retry(ies).")
     state["pending_retries"] = still_pending
     return resolved
 
