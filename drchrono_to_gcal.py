@@ -339,9 +339,10 @@ def _enrich_from_api(ics_events):
             continue
         reason = (appt.get("reason") or "").strip()
         profile_id = appt.get("profile")
-        profile_name = profile_map.get(profile_id, "") if profile_id else ""
-        # DrChrono uses "telehealth" boolean on appointments
-        is_telehealth = bool(appt.get("telehealth"))
+        profile_info = profile_map.get(profile_id, {}) if profile_id else {}
+        profile_name = profile_info.get("name", "") if isinstance(profile_info, dict) else profile_info
+        # is_virtual_base lives on the appointment profile, not the appointment itself
+        is_telehealth = profile_info.get("is_virtual_base", False) if isinstance(profile_info, dict) else False
         appt_lookup[sched] = {
             "reason": reason,
             "profile_name": profile_name,
@@ -521,6 +522,10 @@ def run():
         gcal_body = _build_gcal_body(summary, dtstart, dtend, description,
                                      stable_key=uid, profile_name=profile_name,
                                      is_telehealth=is_telehealth)
+        # Store the rendered GCal title so we detect when profile_name or
+        # is_telehealth changes between runs (raw ICS summary may be stable
+        # while the displayed label needs a refresh).
+        rendered_summary = gcal_body["summary"]
 
         start_iso = _dt_to_iso(dtstart)
         end_iso = _dt_to_iso(dtend)
@@ -528,7 +533,7 @@ def run():
         if uid in event_map:
             existing = event_map[uid]
             # Check if anything changed
-            if (existing["summary"] == summary
+            if (existing.get("summary") == rendered_summary
                     and existing["dtstart"] == start_iso
                     and existing["dtend"] == end_iso
                     and existing["calendar_id"] == target_cal):
@@ -542,7 +547,7 @@ def run():
                     event_map[uid] = {
                         "gcal_event_id": new_event["id"],
                         "calendar_id": target_cal,
-                        "summary": summary,
+                        "summary": rendered_summary,
                         "dtstart": start_iso,
                         "dtend": end_iso,
                     }
@@ -558,7 +563,7 @@ def run():
                 event_map[uid] = {
                     "gcal_event_id": existing["gcal_event_id"],
                     "calendar_id": target_cal,
-                    "summary": summary,
+                    "summary": rendered_summary,
                     "dtstart": start_iso,
                     "dtend": end_iso,
                 }
@@ -572,7 +577,7 @@ def run():
                         event_map[uid] = {
                             "gcal_event_id": new_event["id"],
                             "calendar_id": target_cal,
-                            "summary": summary,
+                            "summary": rendered_summary,
                             "dtstart": start_iso,
                             "dtend": end_iso,
                         }
@@ -591,7 +596,7 @@ def run():
             event_map[uid] = {
                 "gcal_event_id": info["gcal_event_id"],
                 "calendar_id": info["calendar_id"],
-                "summary": summary,
+                "summary": rendered_summary,
                 "dtstart": start_iso,
                 "dtend": end_iso,
             }
@@ -610,7 +615,7 @@ def run():
                 event_map[uid] = {
                     "gcal_event_id": gcal_event_id,
                     "calendar_id": target_cal,
-                    "summary": summary,
+                    "summary": rendered_summary,
                     "dtstart": start_iso,
                     "dtend": end_iso,
                 }
@@ -652,7 +657,7 @@ def run():
                     event_map[uid] = {
                         "gcal_event_id": old_info["gcal_event_id"],
                         "calendar_id": target_cal,
-                        "summary": summary,
+                        "summary": rendered_summary,
                         "dtstart": start_iso,
                         "dtend": end_iso,
                     }
@@ -680,7 +685,7 @@ def run():
             event_map[uid] = {
                 "gcal_event_id": new_event["id"],
                 "calendar_id": target_cal,
-                "summary": summary,
+                "summary": rendered_summary,
                 "dtstart": start_iso,
                 "dtend": end_iso,
             }

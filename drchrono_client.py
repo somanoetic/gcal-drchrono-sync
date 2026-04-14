@@ -249,7 +249,7 @@ def fetch_appointment_profiles():
         data = resp.json()
         results.extend(data.get("results", []))
         url = data.get("next")
-    return {p["id"]: p["name"] for p in results}
+    return {p["id"]: {"name": p["name"], "is_virtual_base": bool(p.get("is_virtual_base"))} for p in results}
 
 
 # -- Discovery helpers -------------------------------------------------
