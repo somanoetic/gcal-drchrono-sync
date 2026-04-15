@@ -1,5 +1,6 @@
 """DrChrono API client -- OAuth token management + appointment CRUD."""
 
+import datetime
 import json
 import os
 import time
@@ -214,24 +215,30 @@ def delete_break(appt_ids):
 def fetch_appointments(date_start, date_end, doctor_id=None):
     """Fetch appointments from the DrChrono API for a date range.
 
-    Returns a dict mapping (scheduled_time, duration) to the appointment dict,
-    so callers can look up fields like 'reason' that aren't in the ICS feed.
+    DrChrono's /appointments endpoint rejects wide date_range queries with 400.
+    Chunk the range into <=90-day windows and concatenate results.
     """
     session = _get_session()
     doc_id = doctor_id or config.DRCHRONO_DOCTOR_ID
+    start = datetime.date.fromisoformat(date_start)
+    end = datetime.date.fromisoformat(date_end)
     results = []
-    url = f"{config.DRCHRONO_API_BASE}/appointments"
-    params = {
-        "doctor": int(doc_id),
-        "date_range": f"{date_start}/{date_end}",
-    }
-    while url:
-        resp = _request_with_retry(session, "get", url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        results.extend(data.get("results", []))
-        url = data.get("next")
-        params = None  # params are already in the 'next' URL
+    chunk_start = start
+    while chunk_start <= end:
+        chunk_end = min(chunk_start + datetime.timedelta(days=89), end)
+        url = f"{config.DRCHRONO_API_BASE}/appointments"
+        params = {
+            "doctor": int(doc_id),
+            "date_range": f"{chunk_start.isoformat()}/{chunk_end.isoformat()}",
+        }
+        while url:
+            resp = _request_with_retry(session, "get", url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            results.extend(data.get("results", []))
+            url = data.get("next")
+            params = None  # params are already in the 'next' URL
+        chunk_start = chunk_end + datetime.timedelta(days=1)
     return results
 
 
