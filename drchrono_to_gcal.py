@@ -341,8 +341,10 @@ def _enrich_from_api(ics_events):
         profile_id = appt.get("profile")
         profile_info = profile_map.get(profile_id, {}) if profile_id else {}
         profile_name = profile_info.get("name", "") if isinstance(profile_info, dict) else profile_info
-        # is_virtual_base lives on the appointment profile, not the appointment itself
-        is_telehealth = profile_info.get("is_virtual_base", False) if isinstance(profile_info, dict) else False
+        # The per-appointment "Video Visit" radio button writes to appt.is_telehealth.
+        # Fall back to the profile's is_virtual_base default if the appt flag is absent.
+        profile_virtual = profile_info.get("is_virtual_base", False) if isinstance(profile_info, dict) else False
+        is_telehealth = bool(appt.get("is_telehealth")) or profile_virtual
         appt_lookup[sched] = {
             "reason": reason,
             "profile_name": profile_name,
