@@ -21,6 +21,19 @@ class NotFoundError(Exception):
     pass
 
 
+class ConfigError(Exception):
+    """Raised when DrChrono rejects a payload because a configured ID
+    (office / patient / profile / doctor) is no longer valid.
+
+    Carries the office_id and the parsed error body so the caller can
+    surface a useful notification instead of treating it as transient.
+    """
+    def __init__(self, message, office_id=None, body=None):
+        super().__init__(message)
+        self.office_id = office_id
+        self.body = body
+
+
 def _load_token():
     if os.path.exists(TOKEN_STORE):
         with open(TOKEN_STORE) as f:
@@ -145,12 +158,18 @@ def create_break(scheduled_time, duration_minutes, reason=""):
 
     Uses the configured block patient + profile. DrChrono API requires a
     patient (patient=null returns 400), so we use a dummy patient.
-    Returns a list of created appointment IDs (one per office).
+    Returns (appt_ids, config_errors):
+      - appt_ids: list of created appointment IDs (one per office that accepted)
+      - config_errors: list of {office_id, body} for offices that returned 400
+        with a "X not valid" error (the caller should notify, but the event
+        was otherwise created in the offices that did accept it).
     Skips offices where the time slot conflicts (409).
+    Raises ConfigError if ALL offices returned 400.
     """
     session = _get_session()
     exam_room = int(config.DRCHRONO_EXAM_ROOM) if config.DRCHRONO_EXAM_ROOM else 1
     appt_ids = []
+    config_errors = []
 
     for office_id in config.DRCHRONO_OFFICE_IDS:
         payload = {
@@ -169,12 +188,32 @@ def create_break(scheduled_time, duration_minutes, reason=""):
         if resp.status_code == 409:
             # Overlap with existing appointment -- skip this office
             continue
+        if resp.status_code == 400:
+            # Config drift: an ID (office/patient/profile/doctor) is no longer
+            # valid. Don't crash the whole event — try the remaining offices,
+            # then either raise ConfigError (so the caller can notify) or
+            # succeed with whatever offices worked.
+            try:
+                body = resp.json()
+            except Exception:
+                body = resp.text
+            config_errors.append({"office_id": office_id, "body": body})
+            print(f"    400 from office {office_id}: {body}")
+            continue
         resp.raise_for_status()
         appt_ids.append(resp.json()["id"])
 
     if not appt_ids:
+        # No office accepted the appointment. If we hit any 400s, surface
+        # ConfigError so the caller can notify; otherwise it was pure 409s.
+        if config_errors:
+            raise ConfigError(
+                f"All offices rejected payload with 400: {config_errors}",
+                office_id=config_errors[0]["office_id"],
+                body=config_errors[0]["body"],
+            )
         raise RuntimeError("409 conflict in all offices")
-    return appt_ids
+    return appt_ids, config_errors
 
 
 def update_break(appt_ids, scheduled_time, duration_minutes, reason=""):

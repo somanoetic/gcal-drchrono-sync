@@ -51,7 +51,7 @@ def main():
     print("=" * 50)
     print("Step 2: Google Calendar -> DrChrono sync")
     print("=" * 50)
-    conflicts = sync.sync()
+    conflicts, config_errors = sync.sync()
 
     print()
     print("=" * 50)
@@ -69,6 +69,18 @@ def main():
             notify.send_conflict_email(conflicts)
         except Exception as e:
             print(f"WARNING: Failed to send notification: {e}")
+
+    # Send email if any blocks failed due to bad config (dedupe + 24h cooldown
+    # is inside send_config_error_email)
+    if config_errors:
+        print()
+        print("=" * 50)
+        print("Checking config error notification...")
+        print("=" * 50)
+        try:
+            notify.send_config_error_email(config_errors)
+        except Exception as e:
+            print(f"WARNING: Failed to send config error notification: {e}")
 
 
 if __name__ == "__main__":

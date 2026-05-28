@@ -124,13 +124,14 @@ def _retry_pending(state):
     """
     pending = state.get("pending_retries", [])
     if not pending:
-        return 0
+        return 0, []
 
     now = datetime.datetime.now()
     event_map = state.setdefault("event_map", {})
     still_pending = []
     resolved = 0
     dropped = 0
+    config_errors = []
 
     for entry in pending:
         key = entry["key"]
@@ -157,12 +158,19 @@ def _retry_pending(state):
 
         try:
             reason = make_note(entry["summary"])
-            appt_ids = drchrono_client.create_break(
+            appt_ids, cfg_errs = drchrono_client.create_break(
                 entry["scheduled_time"], entry["duration"], reason
             )
             event_map[key] = appt_ids
             resolved += 1
+            if cfg_errs:
+                config_errors.extend(cfg_errs)
             print(f"    Retry succeeded: {entry['summary']} ({entry['scheduled_time']})")
+        except drchrono_client.ConfigError as e:
+            # Drop the retry — the underlying config is bad, retrying won't help
+            dropped += 1
+            config_errors.append({"office_id": e.office_id, "body": e.body})
+            print(f"    Retry hit config error (dropping): {entry['summary']}: {e}")
         except Exception as e:
             if "409" in str(e):
                 entry["attempts"] = attempts + 1
@@ -174,7 +182,7 @@ def _retry_pending(state):
     if dropped:
         print(f"  Dropped {dropped} expired/exhausted retry(ies).")
     state["pending_retries"] = still_pending
-    return resolved
+    return resolved, config_errors
 
 
 def _sync_calendar(calendar_id, state, force_full):
@@ -207,6 +215,7 @@ def _sync_calendar(calendar_id, state, force_full):
     deleted = 0
     skipped = 0
     conflicts = []
+    config_errors = []
     seen_keys = set()
 
     for event in events:
@@ -260,10 +269,19 @@ def _sync_calendar(calendar_id, state, force_full):
 
             # ── New → create ────────────────────────────────────────
             try:
-                appt_ids = drchrono_client.create_break(scheduled_time, duration, reason)
+                appt_ids, cfg_errs = drchrono_client.create_break(scheduled_time, duration, reason)
                 event_map[key] = appt_ids
                 created += 1
+                if cfg_errs:
+                    # Partial success: some offices accepted, others returned
+                    # 400 with a "not valid" error. Surface so we notify once.
+                    config_errors.extend(cfg_errs)
                 print(f"    Created: {summary} ({scheduled_time}, {duration}m)")
+            except drchrono_client.ConfigError as e:
+                # All offices rejected — config drift. Don't queue for retry
+                # (would just fail again), just notify.
+                print(f"    CONFIG ERROR creating block for '{summary}': {e}")
+                config_errors.append({"office_id": e.office_id, "body": e.body})
             except Exception as e:
                 print(f"    WARNING: Failed to create block for '{summary}': {e}")
                 if "409" in str(e):
@@ -301,7 +319,7 @@ def _sync_calendar(calendar_id, state, force_full):
                 print(f"    WARNING: Failed to remove day block {block_ids}: {e}")
 
     sync_tokens[calendar_id] = new_sync_token
-    return created, updated, deleted, skipped, conflicts, seen_keys, is_full
+    return created, updated, deleted, skipped, conflicts, config_errors, seen_keys, is_full
 
 
 def sync():
@@ -322,14 +340,17 @@ def sync():
     total_deleted = 0
     total_skipped = 0
     all_conflicts = []
+    all_config_errors = []
 
     # Retry any blocks that previously failed with 409
     pending_count = len(state.get("pending_retries", []))
     if pending_count:
         print(f"Retrying {pending_count} previously failed block(s)...")
-        resolved = _retry_pending(state)
+        resolved, retry_cfg_errs = _retry_pending(state)
         if resolved:
             print(f"  {resolved} block(s) resolved.")
+        if retry_cfg_errs:
+            all_config_errors.extend(retry_cfg_errs)
         remaining = len(state.get("pending_retries", []))
         if remaining:
             print(f"  {remaining} still blocked.")
@@ -341,12 +362,13 @@ def sync():
 
     for cal_id in config.GOOGLE_CALENDAR_IDS:
         try:
-            c, u, d, s, conflicts, seen_keys, is_full = _sync_calendar(cal_id, state, force_full)
+            c, u, d, s, conflicts, cfg_errs, seen_keys, is_full = _sync_calendar(cal_id, state, force_full)
             total_created += c
             total_updated += u
             total_deleted += d
             total_skipped += s
             all_conflicts.extend(conflicts)
+            all_config_errors.extend(cfg_errs)
             all_seen_keys.update(seen_keys)
             if is_full:
                 did_full_sync = True
@@ -377,8 +399,11 @@ def sync():
           f"Deleted: {total_deleted}, Skipped: {total_skipped}")
     if all_conflicts:
         print(f"  {len(all_conflicts)} block(s) failed due to conflicts.")
+    if all_config_errors:
+        print(f"  {len(all_config_errors)} block(s) hit config errors "
+              f"(bad office/patient/profile/doctor ID).")
 
-    return all_conflicts
+    return all_conflicts, all_config_errors
 
 
 if __name__ == "__main__":

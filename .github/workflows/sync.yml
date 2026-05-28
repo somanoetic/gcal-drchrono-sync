@@ -34,6 +34,7 @@ jobs:
             sync_state.json
             buffer_state.json
             drchrono_gcal_state.json
+            .config_error_notify_state.json
           key: sync-state-${{ github.run_id }}
           restore-keys: sync-state-
 
@@ -63,4 +64,5 @@ jobs:
             sync_state.json
             buffer_state.json
             drchrono_gcal_state.json
+            .config_error_notify_state.json
           key: sync-state-${{ github.run_id }}
