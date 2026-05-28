@@ -81,6 +81,7 @@ def send_conflict_email(conflicts, to_email=None):
         return
 
     lines = []
+    forced_count = 0
     for _, c in fresh:
         when = c.get("scheduled_time", "?")
         dur = c.get("duration", "?")
@@ -88,18 +89,40 @@ def send_conflict_email(conflicts, to_email=None):
         summary = c.get("summary", "?")
         pids = c.get("conflicting_patients") or []
         kind = c.get("classification", "?")
+        forced = c.get("forced", False)
+        if forced:
+            forced_count += 1
         suffix = ""
         if pids:
             suffix = f"  [conflicts with patient_id(s): {', '.join(str(p) for p in pids)}]"
         elif kind == "unknown":
             suffix = "  [classification: unknown — check DrChrono]"
+        if forced:
+            suffix = "  [FORCE-BLOCKED — patient was overlapped, reschedule them]" + suffix
         lines.append(f"- {summary} on {when} ({dur}min) — from {cal}{suffix}")
 
+    intro = (
+        f"{len(fresh)} calendar event(s) overlap with real patient appointments.\n"
+    )
+    if forced_count:
+        intro += (
+            f"  • {forced_count} were [FORCE]-tagged — block was created anyway, "
+            "patient still needs to be rescheduled.\n"
+        )
+        if forced_count < len(fresh):
+            intro += (
+                f"  • {len(fresh) - forced_count} were NOT created (DrChrono refused) — "
+                "reschedule the patient OR move the calendar event.\n"
+            )
+    else:
+        intro += (
+            "These could NOT be blocked because the slot is already taken.\n"
+            "Reschedule the patient OR move the calendar event:\n"
+        )
+
     body_text = (
-        f"{len(fresh)} calendar event(s) could NOT be blocked in DrChrono "
-        "because the time slot is already taken by a real patient appointment "
-        "(not by another block).\n\n"
-        "You may need to reschedule the patient OR move the calendar event:\n\n"
+        intro
+        + "\n"
         + "\n".join(lines)
         + "\n\nCheck DrChrono to confirm and decide what to move.\n"
         "You'll be re-notified in 24h if any of these persist."

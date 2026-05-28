@@ -7,6 +7,7 @@ Usage:
 
 import json
 import os
+import re
 import sys
 import datetime
 
@@ -34,14 +35,16 @@ def _allday_matches_keywords(summary):
 
 
 def _expand_allday(event):
-    """Expand an all-day event into per-day (scheduled_time, duration, summary, sub_key) tuples.
+    """Expand an all-day event into per-day (scheduled_time, duration, summary, sub_key, force) tuples.
 
     Each day gets a block covering business hours (ALLDAY_BLOCK_START to ALLDAY_BLOCK_END).
     sub_key is the date string, used to make event_map keys unique per day.
+    force is True if the title contains [FORCE].
     """
-    summary = event.get("summary", "Busy")
-    if not _allday_matches_keywords(summary):
+    raw_summary = event.get("summary", "Busy")
+    if not _allday_matches_keywords(raw_summary):
         return []
+    summary, force = _extract_force_flag(raw_summary)
 
     start_date = datetime.date.fromisoformat(event["start"]["date"])
     end_date = datetime.date.fromisoformat(event["end"]["date"])  # exclusive
@@ -57,7 +60,7 @@ def _expand_allday(event):
     current = start_date
     while current < end_date:
         st = datetime.datetime.combine(current, block_start).strftime("%Y-%m-%dT%H:%M:%S")
-        blocks.append((st, duration, summary, current.isoformat()))
+        blocks.append((st, duration, summary, current.isoformat(), force))
         current += datetime.timedelta(days=1)
 
     return blocks
@@ -72,8 +75,10 @@ def _is_buffer_event(event):
 def parse_event(event):
     """Parse a Google Calendar event into a list of blocks to sync.
 
-    Returns a list of (scheduled_time, duration_minutes, summary, sub_key) tuples.
+    Returns a list of (scheduled_time, duration_minutes, summary, sub_key, force) tuples.
     sub_key is "" for timed events, or a date string for individual days of all-day events.
+    force is True if the GCal title contains [FORCE] (case-insensitive) — sync.py
+    will pass allow_overlapping=True so the block overrides a patient appointment.
     Returns empty list if the event should be skipped.
     """
     start = event.get("start", {})
@@ -92,9 +97,30 @@ def parse_event(event):
         return []
 
     scheduled_time = start_dt.strftime("%Y-%m-%dT%H:%M:%S")
-    summary = event.get("summary", "Busy")
+    raw_summary = event.get("summary", "Busy")
+    summary, force = _extract_force_flag(raw_summary)
 
-    return [(scheduled_time, duration, summary, "")]
+    return [(scheduled_time, duration, summary, "", force)]
+
+
+FORCE_TAG_PATTERN = re.compile(r"\[force\]", re.IGNORECASE)
+
+
+def _extract_force_flag(summary):
+    """Strip [FORCE] (case-insensitive) from a summary; return (clean_summary, force).
+
+    Allows a GCal event titled '[FORCE] Conference' or 'Conference [force]' to
+    block a slot even when a real patient appointment overlaps. The tag is
+    stripped from the reason DrChrono displays.
+    """
+    if not summary:
+        return summary, False
+    if FORCE_TAG_PATTERN.search(summary):
+        cleaned = FORCE_TAG_PATTERN.sub("", summary).strip()
+        # Collapse double spaces left behind
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        return cleaned, True
+    return summary, False
 
 
 def make_note(summary):
@@ -159,7 +185,8 @@ def _retry_pending(state):
         try:
             reason = make_note(entry["summary"])
             appt_ids, cfg_errs = drchrono_client.create_break(
-                entry["scheduled_time"], entry["duration"], reason
+                entry["scheduled_time"], entry["duration"], reason,
+                force=entry.get("force", False),
             )
             event_map[key] = appt_ids
             resolved += 1
@@ -254,7 +281,7 @@ def _sync_calendar(calendar_id, state, force_full):
 
         # Track which map keys this event produces (for stale cleanup)
         block_keys = set()
-        for scheduled_time, duration, summary, sub_key in blocks:
+        for scheduled_time, duration, summary, sub_key, force in blocks:
             key = _map_key(event_id, sub_key)
             block_keys.add(key)
             seen_keys.add(key)
@@ -279,14 +306,33 @@ def _sync_calendar(calendar_id, state, force_full):
 
             # ── New → create ────────────────────────────────────────
             try:
-                appt_ids, cfg_errs = drchrono_client.create_break(scheduled_time, duration, reason)
+                appt_ids, cfg_errs = drchrono_client.create_break(
+                    scheduled_time, duration, reason, force=force
+                )
                 event_map[key] = appt_ids
                 created += 1
                 if cfg_errs:
                     # Partial success: some offices accepted, others returned
                     # 400 with a "not valid" error. Surface so we notify once.
                     config_errors.extend(cfg_errs)
-                print(f"    Created: {summary} ({scheduled_time}, {duration}m)")
+                force_marker = " [FORCE]" if force else ""
+                print(f"    Created{force_marker}: {summary} ({scheduled_time}, {duration}m)")
+                # If we force-blocked over a patient, still surface the conflict
+                # so the user knows to reschedule the patient.
+                if force:
+                    kind, patient_ids = drchrono_client.classify_conflict(
+                        scheduled_time, duration
+                    )
+                    if kind == "patient":
+                        conflicts.append({
+                            "summary": summary,
+                            "scheduled_time": scheduled_time,
+                            "duration": duration,
+                            "calendar_id": calendar_id,
+                            "conflicting_patients": patient_ids,
+                            "classification": "patient",
+                            "forced": True,
+                        })
             except drchrono_client.ConfigError as e:
                 # All offices rejected — config drift. Don't queue for retry
                 # (would just fail again), just notify.
@@ -316,6 +362,7 @@ def _sync_calendar(calendar_id, state, force_full):
                                 "scheduled_time": scheduled_time,
                                 "duration": duration,
                                 "calendar_id": calendar_id,
+                                "force": force,
                             })
                         conflicts.append({
                             "summary": summary,

@@ -203,11 +203,17 @@ def classify_conflict(scheduled_time, duration_minutes):
 # -- Break (appointment) CRUD ------------------------------------------
 
 
-def create_break(scheduled_time, duration_minutes, reason=""):
+def create_break(scheduled_time, duration_minutes, reason="", force=False):
     """Create a break appointment in each configured office.
 
     Uses the configured block patient + profile. DrChrono API requires a
     patient (patient=null returns 400), so we use a dummy patient.
+
+    Args:
+        force: if True, set allow_overlapping=true so DrChrono will accept
+            the block even when a real patient appointment already occupies
+            the slot. Use sparingly — the patient is NOT moved, just overlapped.
+
     Returns (appt_ids, config_errors):
       - appt_ids: list of created appointment IDs (one per office that accepted)
       - config_errors: list of {office_id, body} for offices that returned 400
@@ -231,6 +237,7 @@ def create_break(scheduled_time, duration_minutes, reason=""):
             "patient": int(config.DRCHRONO_BLOCK_PATIENT_ID),
             "profile": int(config.DRCHRONO_BLOCK_PROFILE_ID),
             "reason": reason,
+            "allow_overlapping": bool(force),
         }
         resp = _request_with_retry(session, "post",
                                    f"{config.DRCHRONO_API_BASE}/appointments",
