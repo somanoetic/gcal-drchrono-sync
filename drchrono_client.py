@@ -150,6 +150,56 @@ def _request_with_retry(session, method, url, max_retries=5, **kwargs):
     return resp
 
 
+# -- Conflict inspection -----------------------------------------------
+
+
+def classify_conflict(scheduled_time, duration_minutes):
+    """When create_break gets a 409, look up what's already in that slot.
+
+    Returns one of:
+      - "block"   — the conflicting appointment is OUR block patient. Harmless
+                    redundant block; nothing to notify.
+      - "patient" — a real patient appointment overlaps. The user should
+                    reschedule someone.
+      - "unknown" — couldn't determine (lookup failed, or no overlap found
+                    despite the 409 — treat as worth notifying to be safe).
+
+    Also returns the conflicting patient IDs as a list (empty for "block").
+    """
+    try:
+        start_dt = datetime.datetime.fromisoformat(scheduled_time)
+    except ValueError:
+        return "unknown", []
+    end_dt = start_dt + datetime.timedelta(minutes=duration_minutes)
+    date_str = start_dt.date().isoformat()
+
+    try:
+        appts = fetch_appointments(date_str, date_str)
+    except Exception:
+        return "unknown", []
+
+    block_patient_id = int(config.DRCHRONO_BLOCK_PATIENT_ID) if config.DRCHRONO_BLOCK_PATIENT_ID else None
+    overlapping_patients = []
+    for a in appts:
+        try:
+            a_start = datetime.datetime.fromisoformat(a["scheduled_time"])
+            a_end = a_start + datetime.timedelta(minutes=a.get("duration", 0))
+        except Exception:
+            continue
+        # Overlap check
+        if a_start < end_dt and a_end > start_dt:
+            pid = a.get("patient")
+            if pid is not None and pid != block_patient_id:
+                overlapping_patients.append(pid)
+
+    if overlapping_patients:
+        # De-dupe
+        return "patient", list(dict.fromkeys(overlapping_patients))
+    # If we found no non-block overlaps, it was a block-vs-block (or an
+    # appointment we can't see). Treat as harmless.
+    return "block", []
+
+
 # -- Break (appointment) CRUD ------------------------------------------
 
 

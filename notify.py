@@ -16,10 +16,14 @@ import config
 CONFIG_ERROR_STATE_FILE = os.path.join(
     os.path.dirname(__file__), ".config_error_notify_state.json"
 )
+CONFLICT_STATE_FILE = os.path.join(
+    os.path.dirname(__file__), ".conflict_notify_state.json"
+)
 # Re-notify if a fingerprint reappears more than this many seconds after the
 # last notification. 24h avoids re-spamming every 10-min cron tick but still
 # alerts again the next day if the issue persists.
 CONFIG_ERROR_NOTIFY_INTERVAL_SECONDS = 24 * 60 * 60
+CONFLICT_NOTIFY_INTERVAL_SECONDS = 24 * 60 * 60
 
 
 def _build_gmail_service():
@@ -27,11 +31,25 @@ def _build_gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 
+def _conflict_fingerprint(c):
+    """Stable per-(summary, time) hash so the same conflict doesn't email twice."""
+    blob = f"{c.get('summary')}|{c.get('scheduled_time')}|{c.get('duration')}"
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
 def send_conflict_email(conflicts, to_email=None):
-    """Send an email listing DrChrono blocks that failed due to conflicts.
+    """Send an email when calendar events couldn't be blocked in DrChrono
+    because a real patient appointment occupies the slot.
+
+    Conflicts that overlap only OUR block patient ("Dr. Hadfield Unavailable")
+    are filtered out earlier in sync.py — by the time they reach here, they're
+    either "patient" (real conflict) or "unknown" (lookup failed).
+
+    De-duped by (summary, scheduled_time) with a 24h cooldown.
 
     Args:
-        conflicts: list of dicts with summary, scheduled_time, duration, calendar_id
+        conflicts: list of dicts with summary, scheduled_time, duration,
+            calendar_id, conflicting_patients (list), classification
         to_email: recipient (defaults to QGENDA_CALENDAR_ID / Gmail address)
     """
     if not conflicts:
@@ -40,22 +58,57 @@ def send_conflict_email(conflicts, to_email=None):
     if to_email is None:
         to_email = config.QGENDA_CALENDAR_ID  # hadfield.neil@gmail.com
 
-    lines = []
+    # Load dedup state
+    state = {}
+    if os.path.exists(CONFLICT_STATE_FILE):
+        try:
+            with open(CONFLICT_STATE_FILE) as f:
+                state = json.load(f)
+        except Exception:
+            state = {}
+    now = datetime.datetime.now().timestamp()
+
+    # Filter out conflicts inside cooldown
+    fresh = []
     for c in conflicts:
-        lines.append(f"- {c['summary']} on {c['scheduled_time']} ({c['duration']}min)")
+        fp = _conflict_fingerprint(c)
+        last_sent = state.get(fp, {}).get("last_sent", 0)
+        if now - last_sent >= CONFLICT_NOTIFY_INTERVAL_SECONDS:
+            fresh.append((fp, c))
+
+    if not fresh:
+        print(f"{len(conflicts)} conflict(s) detected but all within 24h cooldown — not re-notifying.")
+        return
+
+    lines = []
+    for _, c in fresh:
+        when = c.get("scheduled_time", "?")
+        dur = c.get("duration", "?")
+        cal = c.get("calendar_id", "?")
+        summary = c.get("summary", "?")
+        pids = c.get("conflicting_patients") or []
+        kind = c.get("classification", "?")
+        suffix = ""
+        if pids:
+            suffix = f"  [conflicts with patient_id(s): {', '.join(str(p) for p in pids)}]"
+        elif kind == "unknown":
+            suffix = "  [classification: unknown — check DrChrono]"
+        lines.append(f"- {summary} on {when} ({dur}min) — from {cal}{suffix}")
 
     body_text = (
-        f"{len(conflicts)} calendar block(s) could NOT be created in DrChrono "
-        "because a patient appointment or other event already exists in that time slot.\n\n"
-        "You may need to reschedule these patients:\n\n"
+        f"{len(fresh)} calendar event(s) could NOT be blocked in DrChrono "
+        "because the time slot is already taken by a real patient appointment "
+        "(not by another block).\n\n"
+        "You may need to reschedule the patient OR move the calendar event:\n\n"
         + "\n".join(lines)
-        + "\n\nCheck DrChrono to see what's booked in those slots."
+        + "\n\nCheck DrChrono to confirm and decide what to move.\n"
+        "You'll be re-notified in 24h if any of these persist."
     )
 
     msg = MIMEText(body_text)
     msg["To"] = to_email
     msg["From"] = "me"
-    msg["Subject"] = f"DrChrono Sync: {len(conflicts)} conflict(s) need attention"
+    msg["Subject"] = f"DrChrono Sync: {len(fresh)} patient conflict(s) need attention"
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
@@ -64,7 +117,13 @@ def send_conflict_email(conflicts, to_email=None):
         userId="me", body={"raw": raw}
     ).execute()
 
-    print(f"Conflict notification sent to {to_email}")
+    # Persist dedup state
+    for fp, _ in fresh:
+        state[fp] = {"last_sent": now}
+    with open(CONFLICT_STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+    print(f"Conflict notification sent to {to_email} ({len(fresh)} fresh conflict(s))")
 
 
 def _config_error_fingerprint(err):

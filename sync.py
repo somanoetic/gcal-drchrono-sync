@@ -173,9 +173,19 @@ def _retry_pending(state):
             print(f"    Retry hit config error (dropping): {entry['summary']}: {e}")
         except Exception as e:
             if "409" in str(e):
-                entry["attempts"] = attempts + 1
-                still_pending.append(entry)
-                print(f"    Retry still blocked: {entry['summary']} ({entry['scheduled_time']})")
+                # Re-classify on each retry — patient may have rescheduled
+                kind, _ = drchrono_client.classify_conflict(
+                    entry["scheduled_time"], entry["duration"]
+                )
+                if kind == "block":
+                    # Slot is now block-protected by some other event —
+                    # drop the retry, the slot is covered.
+                    dropped += 1
+                    print(f"    Slot already blocked — dropping retry: {entry['summary']} ({entry['scheduled_time']})")
+                else:
+                    entry["attempts"] = attempts + 1
+                    still_pending.append(entry)
+                    print(f"    Retry still blocked: {entry['summary']} ({entry['scheduled_time']})")
             else:
                 print(f"    Retry failed: {entry['summary']}: {e}")
 
@@ -285,25 +295,35 @@ def _sync_calendar(calendar_id, state, force_full):
             except Exception as e:
                 print(f"    WARNING: Failed to create block for '{summary}': {e}")
                 if "409" in str(e):
-                    # Queue for retry on next run
-                    pending = state.setdefault("pending_retries", [])
-                    # Avoid duplicate entries
-                    if not any(p["key"] == key for p in pending):
-                        pending.append({
-                            "key": key,
-                            "summary": summary,
-                            "scheduled_time": scheduled_time,
-                            "duration": duration,
-                            "calendar_id": calendar_id,
-                        })
-                    # Only notify on incremental syncs — on full syncs,
-                    # 409s are expected because blocks already exist
-                    if not is_full:
+                    # Classify the conflict before queuing for retry / notify
+                    kind, patient_ids = drchrono_client.classify_conflict(
+                        scheduled_time, duration
+                    )
+                    if kind == "block":
+                        # Slot is already covered by another block — harmless.
+                        # Don't queue for retry (would just keep failing) and
+                        # don't notify. Treat as already-handled.
+                        print(f"    Slot already blocked — skipping retry for '{summary}'")
+                    else:
+                        # "patient" or "unknown" — real conflict worth surfacing.
+                        # Queue for retry (in case the patient gets rescheduled
+                        # before MAX_RETRY_ATTEMPTS).
+                        pending = state.setdefault("pending_retries", [])
+                        if not any(p["key"] == key for p in pending):
+                            pending.append({
+                                "key": key,
+                                "summary": summary,
+                                "scheduled_time": scheduled_time,
+                                "duration": duration,
+                                "calendar_id": calendar_id,
+                            })
                         conflicts.append({
                             "summary": summary,
                             "scheduled_time": scheduled_time,
                             "duration": duration,
                             "calendar_id": calendar_id,
+                            "conflicting_patients": patient_ids,
+                            "classification": kind,
                         })
 
         # If an all-day event was shortened (fewer days), clean up extra day blocks
