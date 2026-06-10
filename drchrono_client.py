@@ -152,6 +152,16 @@ def _request_with_retry(session, method, url, max_retries=5, **kwargs):
 
 # -- Conflict inspection -----------------------------------------------
 
+# Per-process cache so a sync run with hundreds of 409s on the same date
+# only hits /appointments once per date (was once per 409, causing rate
+# limits and 60+ minute syncs).
+_appts_cache_by_date = {}
+
+
+def reset_classify_cache():
+    """Clear the conflict-classification cache. Call between sync runs."""
+    _appts_cache_by_date.clear()
+
 
 def classify_conflict(scheduled_time, duration_minutes):
     """When create_break gets a 409, look up what's already in that slot.
@@ -165,6 +175,9 @@ def classify_conflict(scheduled_time, duration_minutes):
                     despite the 409 — treat as worth notifying to be safe).
 
     Also returns the conflicting patient IDs as a list (empty for "block").
+
+    Caches /appointments responses per date so repeated calls within a sync
+    run don't hammer the DrChrono API.
     """
     try:
         start_dt = datetime.datetime.fromisoformat(scheduled_time)
@@ -173,10 +186,17 @@ def classify_conflict(scheduled_time, duration_minutes):
     end_dt = start_dt + datetime.timedelta(minutes=duration_minutes)
     date_str = start_dt.date().isoformat()
 
-    try:
-        appts = fetch_appointments(date_str, date_str)
-    except Exception:
-        return "unknown", []
+    if date_str in _appts_cache_by_date:
+        appts = _appts_cache_by_date[date_str]
+    else:
+        try:
+            appts = fetch_appointments(date_str, date_str)
+        except Exception:
+            # Cache the empty result too — if /appointments is failing
+            # (rate limit, 403), don't keep retrying it for every 409.
+            _appts_cache_by_date[date_str] = []
+            return "unknown", []
+        _appts_cache_by_date[date_str] = appts
 
     block_patient_id = int(config.DRCHRONO_BLOCK_PATIENT_ID) if config.DRCHRONO_BLOCK_PATIENT_ID else None
     overlapping_patients = []
