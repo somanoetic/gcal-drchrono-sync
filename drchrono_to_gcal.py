@@ -300,6 +300,32 @@ def _extract_patient_initials(summary):
     return initials[:4]
 
 
+def _extract_patient_id(summary):
+    """Extract the DrChrono patient id from an ICS summary.
+
+    The ICS patient code is "{initials}{patient_id as hex}", e.g.
+    "Appointment with BUAR07F7B597" -> initials "BUAR", hex "07F7B597",
+    patient id 133674391. Verified against the API: the hex tail equals the
+    appointment's `patient` field for every event we could check
+    (see diagnose_patient_code.py). Returns None if the code can't be parsed.
+    """
+    prefix = "Appointment with "
+    if not summary.startswith(prefix):
+        return None
+    code = summary[len(prefix):].strip()
+    # Strip the leading alpha initials; the remainder is the hex patient id.
+    i = 0
+    while i < len(code) and code[i].isalpha():
+        i += 1
+    hex_part = code[i:]
+    if not hex_part:
+        return None
+    try:
+        return int(hex_part, 16)
+    except ValueError:
+        return None
+
+
 def _enrich_from_api(ics_events):
     """Look up appointment details via the DrChrono API.
 
@@ -331,20 +357,25 @@ def _enrich_from_api(ics_events):
         print(f"  WARNING: Could not fetch appointment profiles: {e}")
         profile_map = {}
 
-    # Build lookup: scheduled_time -> {reason, profile_name, is_telehealth}
+    # Build two lookups from the API appointments:
+    #   patient_lookup: (scheduled_time, patient_id) -> info  — for patient appts
+    #   time_lookup:    scheduled_time -> info               — for non-patient events
     #
-    # Two appointments can share a scheduled_time (different patients booked at
-    # the same minute). The lookup is keyed only by time, so we must:
-    #   1. Skip cancelled/deleted appointments — they should never contribute a
-    #      profile. (A cancelled IVK visit kept on the schedule for tracking was
-    #      overwriting a real Spravato visit's label at the same time.)
-    #   2. When two *active* appointments collide and disagree on profile, refuse
-    #      to guess — drop the profile so the label falls back to "Appointment"
-    #      rather than silently mislabeling. The ICS feed's opaque patient code
-    #      can't be joined to the API's numeric patient id, so we can't pick the
-    #      right one; better blank than wrong.
+    # Patient appointments are keyed by (time, patient_id) because two different
+    # patients can be booked at the same minute. The ICS patient code embeds the
+    # DrChrono patient id as hex ("BUAR07F7B597" -> 133674391, verified by
+    # diagnose_patient_code.py), so each ICS event resolves to its OWN
+    # appointment — no cross-patient contamination.
+    #
+    # Cancelled/deleted appointments are skipped so they never contribute a
+    # profile. (A cancelled IVK visit kept on the schedule for tracking was
+    # overwriting a real Spravato visit at the same time, mislabeling it "IVK".)
+    #
+    # Non-patient events (breaks/office blocks) carry no patient code, so they
+    # still match by time alone to pick up the reason field.
     SKIP_STATUSES = {"cancelled", "deleted", "rescheduled", "no show"}
-    appt_lookup = {}
+    patient_lookup = {}
+    time_lookup = {}
     for appt in api_appts:
         sched = appt.get("scheduled_time", "")
         if not sched:
@@ -360,21 +391,28 @@ def _enrich_from_api(ics_events):
         profile_virtual = profile_info.get("is_virtual_base", False) if isinstance(profile_info, dict) else False
         is_telehealth = bool(appt.get("is_telehealth")) or profile_virtual
 
-        existing = appt_lookup.get(sched)
-        if existing and existing.get("profile_name") != profile_name:
-            # Active collision with a different profile: ambiguous, blank it out.
-            print(f"  WARNING: two active appointments at {sched} with different "
-                  f"profiles ({existing.get('profile_name')!r} vs {profile_name!r}); "
-                  f"dropping profile label to avoid mislabeling.")
-            existing["profile_name"] = ""
-            continue
-        appt_lookup[sched] = {
-            "reason": reason,
-            "profile_name": profile_name,
-            "is_telehealth": is_telehealth,
-        }
+        info = {"reason": reason, "profile_name": profile_name,
+                "is_telehealth": is_telehealth}
 
-    # Match ICS events to API appointments by start time
+        patient_id = appt.get("patient")
+        if patient_id:
+            key = (sched, patient_id)
+            existing = patient_lookup.get(key)
+            if existing and existing.get("profile_name") != profile_name:
+                # Same patient, same time, conflicting profile — genuinely
+                # ambiguous, so blank the profile rather than guess.
+                print(f"  WARNING: patient {patient_id} has two appointments at "
+                      f"{sched} with different profiles "
+                      f"({existing.get('profile_name')!r} vs {profile_name!r}); "
+                      f"dropping profile label.")
+                existing["profile_name"] = ""
+                continue
+            patient_lookup[key] = info
+        # Time-only lookup is for non-patient events; last writer is fine since
+        # non-patient (break) events don't carry a profile.
+        time_lookup[sched] = info
+
+    # Match ICS events to API appointments
     reasons_matched = 0
     profiles_matched = 0
     for uid, evt in ics_events.items():
@@ -384,16 +422,25 @@ def _enrich_from_api(ics_events):
         # Strip timezone for matching — DrChrono API returns naive local times
         naive = dt.replace(tzinfo=None)
         api_time = naive.strftime("%Y-%m-%dT%H:%M:%S")
-        info = appt_lookup.get(api_time)
-        if not info:
-            continue
-        if not _is_patient_appointment(evt["summary"]) and info["reason"]:
-            evt["description"] = info["reason"]
-            reasons_matched += 1
-        if info["profile_name"]:
-            evt["profile_name"] = info["profile_name"]
-            profiles_matched += 1
-        evt["is_telehealth"] = info["is_telehealth"]
+
+        if _is_patient_appointment(evt["summary"]):
+            # Resolve to this event's own appointment via the embedded patient id.
+            patient_id = _extract_patient_id(evt["summary"])
+            info = patient_lookup.get((api_time, patient_id)) if patient_id else None
+            if not info:
+                continue
+            if info["profile_name"]:
+                evt["profile_name"] = info["profile_name"]
+                profiles_matched += 1
+            evt["is_telehealth"] = info["is_telehealth"]
+        else:
+            info = time_lookup.get(api_time)
+            if not info:
+                continue
+            if info["reason"]:
+                evt["description"] = info["reason"]
+                reasons_matched += 1
+            evt["is_telehealth"] = info["is_telehealth"]
 
     non_patient_count = sum(1 for e in ics_events.values()
                            if not _is_patient_appointment(e["summary"]))
