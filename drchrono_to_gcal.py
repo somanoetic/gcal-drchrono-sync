@@ -332,10 +332,24 @@ def _enrich_from_api(ics_events):
         profile_map = {}
 
     # Build lookup: scheduled_time -> {reason, profile_name, is_telehealth}
+    #
+    # Two appointments can share a scheduled_time (different patients booked at
+    # the same minute). The lookup is keyed only by time, so we must:
+    #   1. Skip cancelled/deleted appointments — they should never contribute a
+    #      profile. (A cancelled IVK visit kept on the schedule for tracking was
+    #      overwriting a real Spravato visit's label at the same time.)
+    #   2. When two *active* appointments collide and disagree on profile, refuse
+    #      to guess — drop the profile so the label falls back to "Appointment"
+    #      rather than silently mislabeling. The ICS feed's opaque patient code
+    #      can't be joined to the API's numeric patient id, so we can't pick the
+    #      right one; better blank than wrong.
+    SKIP_STATUSES = {"cancelled", "deleted", "rescheduled", "no show"}
     appt_lookup = {}
     for appt in api_appts:
         sched = appt.get("scheduled_time", "")
         if not sched:
+            continue
+        if (appt.get("status") or "").strip().lower() in SKIP_STATUSES:
             continue
         reason = (appt.get("reason") or "").strip()
         profile_id = appt.get("profile")
@@ -345,6 +359,15 @@ def _enrich_from_api(ics_events):
         # Fall back to the profile's is_virtual_base default if the appt flag is absent.
         profile_virtual = profile_info.get("is_virtual_base", False) if isinstance(profile_info, dict) else False
         is_telehealth = bool(appt.get("is_telehealth")) or profile_virtual
+
+        existing = appt_lookup.get(sched)
+        if existing and existing.get("profile_name") != profile_name:
+            # Active collision with a different profile: ambiguous, blank it out.
+            print(f"  WARNING: two active appointments at {sched} with different "
+                  f"profiles ({existing.get('profile_name')!r} vs {profile_name!r}); "
+                  f"dropping profile label to avoid mislabeling.")
+            existing["profile_name"] = ""
+            continue
         appt_lookup[sched] = {
             "reason": reason,
             "profile_name": profile_name,
