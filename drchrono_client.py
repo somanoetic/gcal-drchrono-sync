@@ -226,8 +226,12 @@ def classify_conflict(scheduled_time, duration_minutes):
 def create_break(scheduled_time, duration_minutes, reason="", force=False):
     """Create a break appointment in each configured office.
 
-    Uses the configured block patient + profile. DrChrono API requires a
-    patient (patient=null returns 400), so we use a dummy patient.
+    NOTE: The DrChrono API REQUIRES a patient — patient=null returns
+    400 {'patient': ['This field may not be null.']} (verified 2026-06-18,
+    run 27770757165). So we attach the configured dummy block patient.
+    The downside is these appointments are NOT true breaks and can surface
+    in the claims/billing feed; excluding them from claims needs a different
+    mechanism (see below), NOT patient=null.
 
     Args:
         force: if True, set allow_overlapping=true so DrChrono will accept

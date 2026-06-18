@@ -10,8 +10,17 @@
 ### Never run sync locally during debugging
 Running `python run_all.py` or `python drchrono_to_gcal.py` locally creates events using the LOCAL state file, while Actions uses its CACHED state. This causes duplicates every time. If you must test, use `--full` and then clear ALL Actions caches before the next Actions run.
 
-### DrChrono breaks use patient=null
-DrChrono treats appointments with `patient=null` as breaks (`appt_is_break=true`). Do NOT use a dummy patient — that creates regular appointments that show on the schedule incorrectly.
+### DrChrono blocks require a dummy patient — patient=null does NOT work
+The DrChrono API REQUIRES a patient on appointment creation. Sending
+`patient=null` returns 400 `{'patient': ['This field may not be null.']}`
+(verified 2026-06-18, run 27770757165). So blocks are created with the
+configured `DRCHRONO_BLOCK_PATIENT_ID` dummy patient.
+
+Consequence: these blocks are NOT true breaks (`appt_is_break`), so they
+can appear in the live claims/billing feed. Suppressing them from claims
+needs a different mechanism (e.g. an appointment profile/status that is
+excluded from billing, or `appt_is_break` if the API ever exposes it on
+write) — NOT patient=null. This is an open problem, not solved.
 
 ### Echo filtering
 When we create breaks in DrChrono, they echo back in the ICS feed. The `_is_block_echo()` filter skips them. It matches `[GCal Sync]` in the ICS summary (the reason field we set). If breaks stop being filtered, they'll duplicate into GCal.
