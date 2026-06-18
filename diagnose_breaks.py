@@ -81,6 +81,10 @@ def main():
     if breaks:
         print("\n  --> A valid break EXISTS here. Compare its fields to our block "
               "payload to see what differs (esp. profile / exam_room / patient).")
+        # Dump ONE break in full so we have the exact, complete shape DrChrono
+        # stored — this is the template our POST must match to be accepted.
+        print("\n  --- FULL raw record of one existing break (every field) ---")
+        print(json.dumps(breaks[0], indent=2, default=str))
     else:
         print("  --> NO true breaks found. Either none are created this way here, "
               "or the account genuinely can't have them via API.")
