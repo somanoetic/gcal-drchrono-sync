@@ -10,17 +10,19 @@
 ### Never run sync locally during debugging
 Running `python run_all.py` or `python drchrono_to_gcal.py` locally creates events using the LOCAL state file, while Actions uses its CACHED state. This causes duplicates every time. If you must test, use `--full` and then clear ALL Actions caches before the next Actions run.
 
-### DrChrono blocks require a dummy patient — patient=null does NOT work
-The DrChrono API REQUIRES a patient on appointment creation. Sending
-`patient=null` returns 400 `{'patient': ['This field may not be null.']}`
-(verified 2026-06-18, run 27770757165). So blocks are created with the
-configured `DRCHRONO_BLOCK_PATIENT_ID` dummy patient.
+### DrChrono breaks: patient=null + exam_room=0 + no profile
+Blocks are created as TRUE breaks (`appt_is_break=true`), which DrChrono
+EXCLUDES from the live claims/billing feed. The required payload is:
+`patient: null`, `exam_room: 0`, and NO `profile` key.
 
-Consequence: these blocks are NOT true breaks (`appt_is_break`), so they
-can appear in the live claims/billing feed. Suppressing them from claims
-needs a different mechanism (e.g. an appointment profile/status that is
-excluded from billing, or `appt_is_break` if the API ever exposes it on
-write) — NOT patient=null. This is an open problem, not solved.
+The gotcha that cost us a debugging cycle: sending `patient: null` while
+keeping `exam_room: 1` (the old default) returns a misleading
+400 `{'patient': ['This field may not be null.']}`. The real constraint is
+that a break cannot occupy a room — fix the room, not the patient. Verified
+2026-06-18 against a UI-created break (appt 401177999) in office 553982
+(Franklin AllHealth insurance) — a normal active sync office, so breaks are
+NOT office-restricted. `appt_is_break` itself is read-only (set server-side).
+`DRCHRONO_BLOCK_PATIENT_ID` / `DRCHRONO_BLOCK_PROFILE_ID` are now unused.
 
 ### Echo filtering
 When we create breaks in DrChrono, they echo back in the ICS feed. The `_is_block_echo()` filter skips them. It matches `[GCal Sync]` in the ICS summary (the reason field we set). If breaks stop being filtered, they'll duplicate into GCal.

@@ -208,6 +208,10 @@ def classify_conflict(scheduled_time, duration_minutes):
             continue
         # Overlap check
         if a_start < end_dt and a_end > start_dt:
+            # Ignore true breaks (patient=null) and our legacy dummy-patient
+            # blocks — only a real patient appointment counts as a conflict.
+            if a.get("appt_is_break"):
+                continue
             pid = a.get("patient")
             if pid is not None and pid != block_patient_id:
                 overlapping_patients.append(pid)
@@ -224,14 +228,14 @@ def classify_conflict(scheduled_time, duration_minutes):
 
 
 def create_break(scheduled_time, duration_minutes, reason="", force=False):
-    """Create a break appointment in each configured office.
+    """Create a TRUE break appointment in each configured office.
 
-    NOTE: The DrChrono API REQUIRES a patient — patient=null returns
-    400 {'patient': ['This field may not be null.']} (verified 2026-06-18,
-    run 27770757165). So we attach the configured dummy block patient.
-    The downside is these appointments are NOT true breaks and can surface
-    in the claims/billing feed; excluding them from claims needs a different
-    mechanism (see below), NOT patient=null.
+    Breaks (appt_is_break=true) are excluded from the live claims/billing
+    feed. The required payload is patient=null + exam_room=0 + no profile.
+    Sending patient=null with exam_room != 0 returns a misleading
+    400 {'patient': ['This field may not be null.']}; the real constraint is
+    that a break cannot occupy a room. Verified 2026-06-18 against a
+    UI-created break (appt 401177999) in office 553982.
 
     Args:
         force: if True, set allow_overlapping=true so DrChrono will accept
@@ -247,19 +251,24 @@ def create_break(scheduled_time, duration_minutes, reason="", force=False):
     Raises ConfigError if ALL offices returned 400.
     """
     session = _get_session()
-    exam_room = int(config.DRCHRONO_EXAM_ROOM) if config.DRCHRONO_EXAM_ROOM else 1
     appt_ids = []
     config_errors = []
 
     for office_id in config.DRCHRONO_OFFICE_IDS:
+        # Create a TRUE break (appt_is_break=true), which DrChrono excludes
+        # from the live claims/billing feed. A break requires patient=null AND
+        # exam_room=0 AND no profile — verified against a UI-created break in
+        # the same office 553982 (appt id 401177999, 2026-06-18). Sending
+        # patient=null with exam_room=1 (the old default) gets a misleading
+        # 400 "patient may not be null" — the real constraint is the room.
+        # Do NOT add "patient" or "profile" keys here.
         payload = {
             "doctor": int(config.DRCHRONO_DOCTOR_ID),
             "office": int(office_id),
-            "exam_room": exam_room,
+            "exam_room": 0,
             "scheduled_time": scheduled_time,
             "duration": duration_minutes,
-            "patient": int(config.DRCHRONO_BLOCK_PATIENT_ID),
-            "profile": int(config.DRCHRONO_BLOCK_PROFILE_ID),
+            "patient": None,
             "reason": reason,
             "allow_overlapping": bool(force),
         }
