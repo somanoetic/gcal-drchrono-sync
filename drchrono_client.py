@@ -226,8 +226,10 @@ def classify_conflict(scheduled_time, duration_minutes):
 def create_break(scheduled_time, duration_minutes, reason="", force=False):
     """Create a break appointment in each configured office.
 
-    Uses the configured block patient + profile. DrChrono API requires a
-    patient (patient=null returns 400), so we use a dummy patient.
+    Creates a true DrChrono break by sending patient=null (appt_is_break=true).
+    This keeps the block out of the live claims/billing feed. (Previously we
+    attached a dummy block patient, which made breaks look like real billable
+    appointments and polluted the claims feed.)
 
     Args:
         force: if True, set allow_overlapping=true so DrChrono will accept
@@ -254,8 +256,11 @@ def create_break(scheduled_time, duration_minutes, reason="", force=False):
             "exam_room": exam_room,
             "scheduled_time": scheduled_time,
             "duration": duration_minutes,
-            "patient": int(config.DRCHRONO_BLOCK_PATIENT_ID),
-            "profile": int(config.DRCHRONO_BLOCK_PROFILE_ID),
+            # patient=null marks this as a true DrChrono break (appt_is_break=true),
+            # which keeps it OUT of the live claims/billing feed. Attaching a dummy
+            # patient (the old behavior) made these look like real, billable
+            # appointments. Do NOT add a "patient" or "profile" key here.
+            "patient": None,
             "reason": reason,
             "allow_overlapping": bool(force),
         }
