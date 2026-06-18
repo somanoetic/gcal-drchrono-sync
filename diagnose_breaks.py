@@ -61,6 +61,20 @@ def main():
     print(f"Block patient id (dummy) = {block_patient_id!r}")
     print(f"Block note prefix        = {config.BLOCK_NOTE_PREFIX!r}")
 
+    # Read-only: map every office id -> name + archived status, so we can tell
+    # what office our breaks live in vs. our two sync offices (553982/553983).
+    print("\n=== Offices (read-only) ===")
+    session = drchrono_client._get_session()
+    url = f"{config.DRCHRONO_API_BASE}/offices"
+    while url:
+        resp = drchrono_client._request_with_retry(session, "get", url)
+        resp.raise_for_status()
+        data = resp.json()
+        for o in data.get("results", []):
+            print(f"  id={o.get('id')}  name={o.get('name')!r}  "
+                  f"archived={o.get('archived')}")
+        url = data.get("next")
+
     print(f"\n=== Fetching appointments {start} -> {end} ===")
     appts = drchrono_client.fetch_appointments(start, end)
     print(f"Got {len(appts)} appointments.")
