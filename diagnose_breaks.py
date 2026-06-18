@@ -97,8 +97,12 @@ def main():
               "payload to see what differs (esp. profile / exam_room / patient).")
         # Dump ONE break in full so we have the exact, complete shape DrChrono
         # stored — this is the template our POST must match to be accepted.
-        print("\n  --- FULL raw record of one existing break (every field) ---")
-        print(json.dumps(breaks[0], indent=2, default=str))
+        # Prefer a break whose reason looks like a fresh manual test, else first.
+        sample = next((b for b in breaks
+                       if "test" in (b.get("reason") or "").lower()), breaks[0])
+        print(f"\n  --- FULL raw record of break id={sample.get('id')} "
+              f"(reason={sample.get('reason')!r}) ---")
+        print(json.dumps(sample, indent=2, default=str))
     else:
         print("  --> NO true breaks found. Either none are created this way here, "
               "or the account genuinely can't have them via API.")
