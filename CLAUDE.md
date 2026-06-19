@@ -10,19 +10,22 @@
 ### Never run sync locally during debugging
 Running `python run_all.py` or `python drchrono_to_gcal.py` locally creates events using the LOCAL state file, while Actions uses its CACHED state. This causes duplicates every time. If you must test, use `--full` and then clear ALL Actions caches before the next Actions run.
 
-### DrChrono breaks: patient=null + exam_room=0 + no profile
-Blocks are created as TRUE breaks (`appt_is_break=true`), which DrChrono
-EXCLUDES from the live claims/billing feed. The required payload is:
-`patient: null`, `exam_room: 0`, and NO `profile` key.
+### Keeping blocks out of the Live Claims Feed: status="Cancelled"
+Blocks use a dummy patient (`DRCHRONO_BLOCK_PATIENT_ID`) + block profile
+(`DRCHRONO_BLOCK_PROFILE_ID`) + **`status: "Cancelled"`**. DrChrono excludes
+Cancelled (and Rescheduled) appointments from the Live Claims Feed, so this
+keeps blocks out of billing. Trade-off: Cancelled blocks render faded on the
+schedule. Use "Cancelled" (two L's) — the value this account uses.
 
-The gotcha that cost us a debugging cycle: sending `patient: null` while
-keeping `exam_room: 1` (the old default) returns a misleading
-400 `{'patient': ['This field may not be null.']}`. The real constraint is
-that a break cannot occupy a room — fix the room, not the patient. Verified
-2026-06-18 against a UI-created break (appt 401177999) in office 553982
-(Franklin AllHealth insurance) — a normal active sync office, so breaks are
-NOT office-restricted. `appt_is_break` itself is read-only (set server-side).
-`DRCHRONO_BLOCK_PATIENT_ID` / `DRCHRONO_BLOCK_PROFILE_ID` are now unused.
+Why not a TRUE break (`patient=null`, `appt_is_break=true`)? Breaks ARE
+excluded from claims and are the semantically-correct option, BUT the API
+rejects `patient: null` in our insurance offices (553982/553983) with
+400 `{'patient': ['This field may not be null.']}` — even with `exam_room=0`
+and no `profile`. A break with that exact payload created via the WEB UI in
+the SAME office (appt 401177999, office 553982) persists fine, so it's an
+API-vs-UI discrepancy. **Open with DrChrono support** (2026-06-18). If they
+enable API break creation, switch `create_break` back to the break payload —
+it's cleaner (no faded appointments). `appt_is_break` is read-only.
 
 ### Echo filtering
 When we create breaks in DrChrono, they echo back in the ICS feed. The `_is_block_echo()` filter skips them. It matches `[GCal Sync]` in the ICS summary (the reason field we set). If breaks stop being filtered, they'll duplicate into GCal.

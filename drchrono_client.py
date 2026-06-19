@@ -228,14 +228,14 @@ def classify_conflict(scheduled_time, duration_minutes):
 
 
 def create_break(scheduled_time, duration_minutes, reason="", force=False):
-    """Create a TRUE break appointment in each configured office.
+    """Create a block appointment (status=Cancelled) in each configured office.
 
-    Breaks (appt_is_break=true) are excluded from the live claims/billing
-    feed. The required payload is patient=null + exam_room=0 + no profile.
-    Sending patient=null with exam_room != 0 returns a misleading
-    400 {'patient': ['This field may not be null.']}; the real constraint is
-    that a break cannot occupy a room. Verified 2026-06-18 against a
-    UI-created break (appt 401177999) in office 553982.
+    Blocks use a dummy patient + block profile + status="Cancelled".
+    DrChrono excludes Cancelled/Rescheduled appointments from the Live Claims
+    Feed, so this keeps blocks out of billing. We use this instead of a true
+    break (patient=null) because the API rejects patient=null in our insurance
+    offices (553982/553983) with 400 "patient may not be null". Trade-off:
+    Cancelled blocks render faded on the DrChrono schedule.
 
     Args:
         force: if True, set allow_overlapping=true so DrChrono will accept
@@ -251,24 +251,29 @@ def create_break(scheduled_time, duration_minutes, reason="", force=False):
     Raises ConfigError if ALL offices returned 400.
     """
     session = _get_session()
+    exam_room = int(config.DRCHRONO_EXAM_ROOM) if config.DRCHRONO_EXAM_ROOM else 1
     appt_ids = []
     config_errors = []
 
     for office_id in config.DRCHRONO_OFFICE_IDS:
-        # Create a TRUE break (appt_is_break=true), which DrChrono excludes
-        # from the live claims/billing feed. A break requires patient=null AND
-        # exam_room=0 AND no profile — verified against a UI-created break in
-        # the same office 553982 (appt id 401177999, 2026-06-18). Sending
-        # patient=null with exam_room=1 (the old default) gets a misleading
-        # 400 "patient may not be null" — the real constraint is the room.
-        # Do NOT add "patient" or "profile" keys here.
+        # Block appointments use a dummy patient + block profile, plus
+        # status="Cancelled". DrChrono EXCLUDES Cancelled (and Rescheduled)
+        # appointments from the Live Claims Feed, so this keeps blocks out of
+        # billing without needing a true break (patient=null), which the API
+        # rejects in our insurance offices (553982/553983) with a 400
+        # "patient may not be null" — see CLAUDE.md. Trade-off: Cancelled
+        # appointments render faded on the schedule.
+        # NOTE: "Cancelled" (two L's) is the exact value this account uses
+        # (verified in diagnose_breaks output, 2026-06-18).
         payload = {
             "doctor": int(config.DRCHRONO_DOCTOR_ID),
             "office": int(office_id),
-            "exam_room": 0,
+            "exam_room": exam_room,
             "scheduled_time": scheduled_time,
             "duration": duration_minutes,
-            "patient": None,
+            "patient": int(config.DRCHRONO_BLOCK_PATIENT_ID),
+            "profile": int(config.DRCHRONO_BLOCK_PROFILE_ID),
+            "status": "Cancelled",
             "reason": reason,
             "allow_overlapping": bool(force),
         }
@@ -316,6 +321,9 @@ def update_break(appt_ids, scheduled_time, duration_minutes, reason=""):
         "scheduled_time": scheduled_time,
         "duration": duration_minutes,
         "reason": reason,
+        # Keep blocks Cancelled so they stay out of the Live Claims Feed even
+        # after an update (e.g. time change). See create_break for rationale.
+        "status": "Cancelled",
     }
 
     for appt_id in appt_ids:
