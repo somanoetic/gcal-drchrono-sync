@@ -49,9 +49,15 @@ def main():
 
     print()
     print("=" * 50)
-    print("Step 2: Google Calendar -> DrChrono sync")
+    print("Step 2: Google Calendar -> DrChrono sync [DISABLED]")
     print("=" * 50)
-    conflicts, config_errors = sync.sync()
+    # Disabled 2026-06-29: Dr. Hadfield no longer blocks off personal-calendar
+    # time in DrChrono. We stop creating GCal -> DrChrono blocks here. Shift
+    # buffers (Step 1, GCal-only) and the DrChrono -> GCal reverse sync (Step 3)
+    # are unaffected. To re-enable, uncomment the call below.
+    print("  Skipped (personal-calendar blocking turned off).")
+    conflicts, config_errors = [], []
+    # conflicts, config_errors = sync.sync()
 
     print()
     print("=" * 50)
