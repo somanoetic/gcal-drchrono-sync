@@ -68,7 +68,7 @@ def main():
 
     print()
     print("=" * 50)
-    print("Step 4: Other-provider appointment alert")
+    print("Step 4: Tomorrow's schedule email (all providers)")
     print("=" * 50)
     try:
         provider_alert.run()
