@@ -4,8 +4,13 @@ on:
   schedule:
     - cron: "*/10 * * * *"   # polls for DrChrono changes (event-triggered handles GCal)
   workflow_dispatch:
+    inputs:
+      force_provider_alert:
+        description: "Send the other-provider alert now (testing)"
+        type: boolean
+        default: false
   repository_dispatch:
-    types: [calendar-changed]
+    types: [calendar-changed, evening-check]
 
 concurrency:
   group: sync
@@ -36,6 +41,7 @@ jobs:
             drchrono_gcal_state.json
             .config_error_notify_state.json
             .conflict_notify_state.json
+            .provider_alert_state.json
           key: sync-state-${{ github.run_id }}
           restore-keys: sync-state-
 
@@ -53,6 +59,8 @@ jobs:
           fi
 
       - name: Run sync
+        env:
+          PROVIDER_ALERT_FORCE: ${{ inputs.force_provider_alert && '1' || '' }}
         run: python run_all.py
 
       - name: Save state and tokens to cache
@@ -67,4 +75,5 @@ jobs:
             drchrono_gcal_state.json
             .config_error_notify_state.json
             .conflict_notify_state.json
+            .provider_alert_state.json
           key: sync-state-${{ github.run_id }}

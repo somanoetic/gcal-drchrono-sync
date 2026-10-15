@@ -63,6 +63,29 @@ function onCalendarChange(e) {
   }
 }
 
+/**
+ * Evening check: fires the sync at ~7pm so provider_alert.py can email
+ * tomorrow's appointments booked under another provider. GitHub's own cron
+ * is throttled to every 3-5h, so this keeps the alert on time.
+ *
+ * SETUP: Triggers → Add Trigger → Function: eveningCheck,
+ *   Event source: Time-driven, Day timer, 7pm to 8pm.
+ */
+function eveningCheck() {
+  var token = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
+  var response = UrlFetchApp.fetch('https://api.github.com/repos/' + GITHUB_REPO + '/dispatches', {
+    method: 'post',
+    headers: {
+      'Authorization': 'Bearer ' + token,
+      'Accept': 'application/vnd.github.v3+json',
+    },
+    contentType: 'application/json',
+    payload: JSON.stringify({ event_type: 'evening-check' }),
+    muteHttpExceptions: true,
+  });
+  Logger.log('evening-check dispatch: ' + response.getResponseCode());
+}
+
 // Manual test function — run this from the Apps Script editor to verify setup
 function testDispatch() {
   onCalendarChange(null);

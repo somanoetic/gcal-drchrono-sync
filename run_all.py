@@ -14,6 +14,7 @@ import shift_buffers
 import sync
 import drchrono_to_gcal
 import notify
+import provider_alert
 
 
 def _run_one_time_cleanup():
@@ -64,6 +65,15 @@ def main():
     print("Step 3: DrChrono -> Google Calendar filtered sync")
     print("=" * 50)
     drchrono_to_gcal.run()
+
+    print()
+    print("=" * 50)
+    print("Step 4: Other-provider appointment alert")
+    print("=" * 50)
+    try:
+        provider_alert.run()
+    except Exception as e:
+        print(f"WARNING: Provider alert failed: {e}")
 
     # Send email if any blocks failed due to conflicts
     if conflicts:
