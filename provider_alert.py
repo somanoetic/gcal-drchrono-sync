@@ -1,4 +1,4 @@
-"""Evening email: tomorrow's full DrChrono schedule, across all providers.
+"""Evening email: tomorrow's Franklin, MA DrChrono schedule, all providers.
 
 DrChrono -> GCal sync only covers DRCHRONO_DOCTOR_ID (Dr. Hadfield). Patients
 mistakenly booked under another provider (e.g. Shelbiann Spence) never reach
@@ -30,6 +30,9 @@ STATE_FILE = os.path.join(os.path.dirname(__file__), ".provider_alert_state.json
 ALERT_TZ = ZoneInfo(os.getenv("PROVIDER_ALERT_TZ", "America/New_York"))
 ALERT_HOUR = int(os.getenv("PROVIDER_ALERT_HOUR", "19"))
 SKIP_STATUSES = {"cancelled", "canceled", "rescheduled"}
+# Only offices in this city/state go in the email
+ALERT_CITY = os.getenv("PROVIDER_ALERT_CITY", "Franklin").strip().lower()
+ALERT_STATE = os.getenv("PROVIDER_ALERT_STATE", "MA").strip().lower()
 
 
 def _load_state():
@@ -100,8 +103,15 @@ def run():
     doctors = _all_doctors(session)
     my_id = str(config.DRCHRONO_DOCTOR_ID)
     offices = {
-        o["id"]: o.get("name", str(o["id"])) for o in drchrono_client.list_offices()
+        o["id"]: o.get("name", str(o["id"]))
+        for o in drchrono_client.list_offices()
+        if (o.get("city") or "").strip().lower() == ALERT_CITY
+        and (o.get("state") or "").strip().lower() == ALERT_STATE
     }
+    print(f"  Offices included: {', '.join(offices.values()) or 'NONE'}")
+    if not offices:
+        print(f"  No offices in {ALERT_CITY}, {ALERT_STATE} — not sending.")
+        return
 
     rows = []
     for doc_id, doc_name in doctors.items():
@@ -110,6 +120,8 @@ def run():
             if not a.get("patient"):
                 continue  # breaks / blocks
             if (a.get("status") or "").strip().lower() in SKIP_STATUSES:
+                continue
+            if a.get("office") not in offices:
                 continue
             rows.append((a.get("scheduled_time", ""), str(doc_id) == my_id, doc_name, a))
 
@@ -134,7 +146,7 @@ def run():
 
     day = datetime.date.fromisoformat(tomorrow).strftime("%A %b %-d")
     body = (
-        f"All DrChrono appointments for {day}, every provider "
+        f"All Franklin, MA DrChrono appointments for {day}, every provider "
         f"({len(rows)} total).\n\n"
         + ("\n".join(lines) if lines else "(no appointments)")
     )
